@@ -1,0 +1,3022 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reforge Legacy Analyzer — JCL &amp; COBOL Mainframe | Traduction Python IA</title>
+<meta name="description" content="Analyze your JCL and COBOL IBM z/OS files, visualize your mainframe system map and translate COBOL to Python with AI. Free, 100% browser-based.">
+<meta name="keywords" content="JCL analyzer, COBOL analyzer, mainframe modernization, IBM z/OS, COBOL to Python, legacy code analysis, Reforge, OPC TWS, mainframe modernization">
+<meta name="author" content="Adrien — adrien@vyniad.be">
+<meta name="robots" content="index, follow">
+<meta property="og:title" content="Reforge Legacy Analyzer — JCL &amp; COBOL Mainframe Tool">
+<meta property="og:description" content="Analyze JCL and COBOL mainframe files, interactive system map, AI-powered COBOL→Python translation. Free.">
+<meta property="og:type" content="website">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:       #0d0f14;
+    --bg2:      #13161e;
+    --bg3:      #1a1d28;
+    --border:   #252836;
+    --border2:  #2e3248;
+    --text:     #c9cdd8;
+    --text2:    #7a80a0;
+    --text3:    #454a66;
+    --accent:   #4e9bff;
+    --accent2:  #2563c0;
+    --green:    #3dd68c;
+    --yellow:   #f0b429;
+    --red:      #f06560;
+    --purple:   #a78bfa;
+    --cyan:     #38bdf8;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'IBM Plex Sans', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── HEADER ── */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg2);
+    flex-shrink: 0;
+  }
+  .logo {
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 600;
+    font-size: 15px;
+    color: var(--accent);
+    letter-spacing: 0.04em;
+  }
+  .logo span { color: var(--text2); font-weight: 300; }
+  .header-tag {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    color: var(--text3);
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 3px;
+    padding: 2px 7px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .header-spacer { flex: 1; }
+  .status-dot {
+    width: 7px; height: 7px;
+    background: var(--green);
+    border-radius: 50%;
+    box-shadow: 0 0 6px var(--green);
+  }
+  .status-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: var(--text2);
+  }
+
+  /* ── LAYOUT ── */
+  .workspace { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── LEFT PANEL ── */
+  .left-panel {
+    width: 340px;
+    border-right: 1px solid var(--border);
+    background: var(--bg2);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+  }
+  .panel-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text3);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .panel-header-icon { color: var(--accent); font-size: 12px; }
+
+  /* ── UPLOAD ZONE ── */
+  .upload-zone {
+    margin: 16px;
+    border: 1.5px dashed var(--border2);
+    border-radius: 8px;
+    padding: 26px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    background: var(--bg3);
+    position: relative;
+  }
+  .upload-zone:hover, .upload-zone.drag-over {
+    border-color: var(--accent);
+    background: rgba(78,155,255,0.05);
+  }
+  .upload-zone input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .upload-icon { font-size: 26px; margin-bottom: 8px; filter: grayscale(0.3); }
+  .upload-title { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--text); margin-bottom: 4px; }
+  .upload-sub { font-size: 11px; color: var(--text3); }
+  .upload-sub em { color: var(--accent); font-style: normal; cursor: pointer; }
+
+  /* ── PASTE CODE PANEL ── */
+  .paste-toggle-btn {
+    margin: 0 16px 12px;
+    padding: 8px 14px;
+    background: transparent;
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    color: var(--text2);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-align: center;
+    width: calc(100% - 32px);
+  }
+  .paste-toggle-btn:hover { border-color: var(--accent); color: var(--accent); background: rgba(78,155,255,0.05); }
+  .paste-toggle-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(78,155,255,0.08); }
+  .paste-panel {
+    margin: 0 16px 14px;
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    background: var(--bg3);
+    padding: 10px;
+  }
+  .paste-textarea {
+    width: 100%; min-height: 140px; max-height: 280px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    line-height: 1.6; padding: 10px; resize: vertical; outline: none;
+  }
+  .paste-textarea:focus { border-color: var(--accent); }
+  .paste-textarea::placeholder { color: var(--text3); }
+  .paste-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .paste-filename {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text2); font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    padding: 7px 10px; outline: none;
+  }
+  .paste-filename:focus { border-color: var(--accent); }
+  .paste-filename::placeholder { color: var(--text3); }
+  .paste-add-btn {
+    padding: 7px 14px; background: var(--accent2); border: none; border-radius: 6px;
+    color: #fff; font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: 500;
+    cursor: pointer; transition: background 0.2s; white-space: nowrap;
+  }
+  .paste-add-btn:hover { background: var(--accent); }
+  .paste-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── FILE LIST ── */
+  .file-info { margin: 0 16px 16px; display: none; }
+  .file-info.show { display: block; }
+
+  .lang-badge {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 8px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 3px;
+    letter-spacing: 0.04em;
+  }
+  .lang-jcl   { background: rgba(78,155,255,0.12); color: var(--accent); border: 1px solid rgba(78,155,255,0.3); }
+  .lang-cobol { background: rgba(167,139,250,0.12); color: var(--purple); border: 1px solid rgba(167,139,250,0.3); }
+  .lang-unknown { background: rgba(122,128,160,0.12); color: var(--text3); border: 1px solid rgba(122,128,160,0.3); }
+
+  /* ── PARSE BUTTON ── */
+  .parse-btn {
+    margin: 0 16px 16px;
+    padding: 11px 16px;
+    background: var(--accent2);
+    border: none;
+    border-radius: 6px;
+    color: #fff;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    letter-spacing: 0.04em;
+    display: none;
+  }
+  .parse-btn.show { display: block; }
+  .parse-btn:hover { background: var(--accent); }
+  .parse-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* ── STATS ── */
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 0 16px 16px; }
+  .stat-card { background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 12px; text-align: center; }
+  .stat-value { font-family: 'IBM Plex Mono', monospace; font-size: 22px; font-weight: 600; color: var(--accent); line-height: 1; margin-bottom: 4px; }
+  .stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text3); }
+
+  /* ── RIGHT PANEL ── */
+  .right-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* ── TABS ── */
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); background: var(--bg2); padding: 0 20px; flex-shrink: 0; }
+  .tab {
+    padding: 12px 18px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text3);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.15s;
+    margin-bottom: -1px;
+  }
+  .tab:hover { color: var(--text2); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .tab-content { display: none; flex: 1; overflow-y: auto; padding: 20px; }
+  .tab-content.active { display: block; }
+
+  /* ── EMPTY STATE ── */
+  .empty-state {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; min-height: 300px; color: var(--text3); text-align: center;
+  }
+  .empty-icon { font-size: 40px; margin-bottom: 16px; opacity: 0.4; }
+  .empty-title { font-family: 'IBM Plex Mono', monospace; font-size: 13px; margin-bottom: 8px; color: var(--text2); }
+  .empty-sub { font-size: 12px; max-width: 360px; }
+
+  /* ── CARDS (jobs, programs, generic nodes) ── */
+  .job-card {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 16px; overflow: hidden; animation: fadeIn 0.3s ease;
+  }
+  @keyframes fadeIn { from { opacity:0; transform: translateY(8px); } to { opacity:1; transform:none; } }
+  .job-header {
+    display: flex; align-items: center; gap: 12px; padding: 14px 16px;
+    background: var(--bg3); border-bottom: 1px solid var(--border);
+    cursor: pointer; user-select: none;
+  }
+  .job-badge {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 2px 8px;
+    border-radius: 3px; font-weight: 600; letter-spacing: 0.06em;
+    background: rgba(78,155,255,0.15); color: var(--accent); border: 1px solid rgba(78,155,255,0.3);
+  }
+  .job-badge.cobol { background: rgba(167,139,250,0.15); color: var(--purple); border-color: rgba(167,139,250,0.3); }
+  .job-name { font-family: 'IBM Plex Mono', monospace; font-size: 14px; font-weight: 600; color: var(--text); flex: 1; }
+  .job-class { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text3); }
+  .job-chevron { color: var(--text3); transition: transform 0.2s; font-size: 12px; }
+  .job-card.collapsed .job-chevron { transform: rotate(-90deg); }
+  .job-card.collapsed .job-body { display: none; }
+  .job-body { padding: 16px; }
+  .job-meta-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .meta-pill {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 3px 10px;
+    border-radius: 20px; border: 1px solid var(--border2); color: var(--text2); background: var(--bg3);
+  }
+  .meta-pill .k { color: var(--text3); margin-right: 4px; }
+  .meta-pill .v { color: var(--cyan); }
+
+  .section-title {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--text3); margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
+  }
+  .section-title::after { content:''; flex:1; height:1px; background: var(--border); }
+
+  .steps-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 20px; }
+  .steps-table th {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.07em; color: var(--text3); text-align: left; padding: 8px 12px;
+    border-bottom: 1px solid var(--border); background: var(--bg3);
+  }
+  .steps-table td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .steps-table tr:last-child td { border-bottom: none; }
+  .steps-table tr:hover td { background: var(--bg3); }
+
+  .cell-mono { font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
+  .step-name { color: var(--yellow); }
+  .pgm-name { color: var(--purple); }
+  .proc-name { color: var(--cyan); }
+  .cond-val { color: var(--text2); font-size: 10px; }
+  .step-num {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text3);
+    background: var(--bg3); border: 1px solid var(--border); border-radius: 3px;
+    padding: 1px 6px; display: inline-block;
+  }
+  .tag-exec { font-size: 10px; padding: 1px 6px; border-radius: 3px; font-family: 'IBM Plex Mono', monospace; font-weight: 500; }
+  .tag-pgm { background: rgba(167,139,250,0.12); color: var(--purple); border: 1px solid rgba(167,139,250,0.25); }
+  .tag-proc { background: rgba(56,189,248,0.12); color: var(--cyan); border: 1px solid rgba(56,189,248,0.25); }
+
+  /* ── DATA CARDS (datasets, files) ── */
+  .datasets-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; margin-bottom: 20px; }
+  .dataset-card { background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+  .dataset-name { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--green); margin-bottom: 4px; word-break: break-all; }
+  .dataset-meta { font-size: 10px; color: var(--text3); display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .dataset-tag { font-family: 'IBM Plex Mono', monospace; padding: 1px 5px; border-radius: 3px; font-size: 9px; font-weight: 600; text-transform: uppercase; }
+  .dsn-input  { background: rgba(61,214,140,0.1); color: var(--green);  border: 1px solid rgba(61,214,140,0.2); }
+  .dsn-output { background: rgba(240,180,41,0.1); color: var(--yellow); border: 1px solid rgba(240,180,41,0.2); }
+  .dsn-vsam   { background: rgba(56,189,248,0.1); color: var(--cyan);   border: 1px solid rgba(56,189,248,0.2); }
+  .dsn-gdk    { background: rgba(167,139,250,0.1); color: var(--purple); border: 1px solid rgba(167,139,250,0.2); }
+  .dsn-disp   { font-family: 'IBM Plex Mono', monospace; font-size: 9px; color: var(--text3); }
+
+  .all-datasets-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .filter-bar { display: flex; gap: 6px; }
+  .filter-btn {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 4px 10px; border-radius: 4px;
+    border: 1px solid var(--border2); background: transparent; color: var(--text3); cursor: pointer;
+    transition: all 0.15s; text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .filter-btn:hover, .filter-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(78,155,255,0.08); }
+
+  .scrollbar-custom::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollbar-custom::-webkit-scrollbar-track { background: var(--bg); }
+  .scrollbar-custom::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  /* ── SOURCE VIEWER ── */
+  .src-line { display: flex; min-height: 20px; padding: 0 14px 0 0; }
+  .src-line:hover { background: rgba(255,255,255,0.03); }
+  .src-linenum {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text3); min-width: 46px;
+    text-align: right; padding: 0 14px 0 14px; user-select: none; flex-shrink: 0;
+    border-right: 1px solid var(--border); margin-right: 14px;
+  }
+  .src-body { white-space: pre; flex: 1; }
+
+  /* tokens syntaxiques */
+  .t-comment  { color: #4a5168; font-style: italic; }
+  .t-label    { color: #f0b429; font-weight: 500; }
+  .t-kw-job   { color: #4e9bff; font-weight: 600; }
+  .t-kw-exec  { color: #a78bfa; font-weight: 600; }
+  .t-kw-dd    { color: #38bdf8; font-weight: 600; }
+  .t-kw-other { color: #7a80a0; font-weight: 500; }
+  .t-pgm      { color: #a78bfa; }
+  .t-proc-val { color: #38bdf8; }
+  .t-dsn      { color: #3dd68c; }
+  .t-key      { color: #7a80a0; }
+  .t-val      { color: #c9cdd8; }
+  .t-str      { color: #e06c75; }
+  .t-sysout   { color: #f0b429; }
+  .t-sym      { color: #e5c07b; }
+  .t-slash    { color: #454a66; }
+  .t-delim    { color: #454a66; }
+
+  /* ── FILE LIST ITEMS ── */
+  .file-list-item { padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .file-list-row { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+  .file-list-name {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--accent); flex: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .file-list-remove { cursor: pointer; color: var(--text3); font-size: 14px; line-height: 1; padding: 0 2px; }
+  .file-list-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .file-list-meta span { font-size: 9px; color: var(--text3); }
+
+  /* ── LIGHT THEME ── */
+  body.light {
+    --bg:     #f5f6fa;
+    --bg2:    #ffffff;
+    --bg3:    #eef0f7;
+    --border: #d0d4e8;
+    --border2:#b8bdd6;
+    --text:   #1a1d2e;
+    --text2:  #4a5168;
+    --text3:  #8a90aa;
+    --accent: #2563c0;
+    --accent2:#1a4a9e;
+    --green:  #16a34a;
+    --yellow: #ca8a04;
+    --red:    #dc2626;
+    --purple: #7c3aed;
+    --cyan:   #0891b2;
+  }
+  body.light .source-code,
+  body.light #sourceHlCode,
+  body.light #pythonCode { background:#f8f9fc; }
+
+  /* ── THEME TOGGLE ── */
+  .theme-toggle {
+    width:32px; height:18px; background:var(--border2); border-radius:9px;
+    border:none; cursor:pointer; position:relative; transition:background 0.2s; flex-shrink:0;
+  }
+  .theme-toggle::after {
+    content:''; position:absolute; top:3px; left:3px;
+    width:12px; height:12px; border-radius:50%; background:#fff; transition:left 0.2s;
+  }
+  body.light .theme-toggle { background:var(--accent); }
+  body.light .theme-toggle::after { left:17px; }
+
+  /* ── SEARCH BAR ── */
+  .search-bar {
+    display:flex; align-items:center; gap:8px;
+    margin: 0 16px 12px; padding:7px 10px;
+    background:var(--bg3); border:1px solid var(--border);
+    border-radius:6px; transition:border-color 0.15s;
+  }
+  .search-bar:focus-within { border-color:var(--accent); }
+  .search-input {
+    flex:1; background:none; border:none; outline:none;
+    font-family:'IBM Plex Mono',monospace; font-size:11px;
+    color:var(--text); caret-color:var(--accent);
+  }
+  .search-input::placeholder { color:var(--text3); }
+  .search-icon { color:var(--text3); font-size:13px; flex-shrink:0; }
+  .search-count { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--text3); white-space:nowrap; }
+
+  /* ── EXPORT BAR ── */
+  .export-bar {
+    display:none; align-items:center; gap:6px;
+    margin-bottom:12px; flex-wrap:wrap;
+  }
+  .export-bar.show { display:flex; }
+  .export-btn {
+    padding:5px 12px; background:transparent;
+    border:1px solid var(--border2); border-radius:4px;
+    color:var(--text2); font-family:'IBM Plex Mono',monospace;
+    font-size:10px; cursor:pointer; transition:all 0.15s;
+  }
+  .export-btn:hover { border-color:var(--accent); color:var(--accent); background:rgba(78,155,255,0.06); }
+
+  /* ── HIGHLIGHT SEARCH ── */
+  .search-highlight { background:rgba(240,180,41,0.35); border-radius:2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">REFORGE<span>.io</span></div>
+  <div class="header-tag">Legacy Analyzer</div>
+  <div class="header-tag">v2.0 · unifié</div>
+  <div class="header-spacer"></div>
+  <button class="theme-toggle" id="themeToggle" title="Toggle light/dark theme"></button>
+  <a href="mailto:adrien@vyniad.be" title="Contact Adrien" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);text-decoration:none;margin-right:8px;transition:color 0.2s" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--text3)'">adrien@vyniad.be</a>
+  <div class="status-dot"></div>
+  <div class="status-label">Parser active</div>
+</header>
+
+<div class="workspace">
+
+  <!-- LEFT PANEL — upload unique, tous langages -->
+  <div class="left-panel">
+    <div class="panel-header">
+      <span class="panel-header-icon">⬆</span>
+      Source
+    </div>
+
+    <div class="upload-zone" id="dropZone">
+      <input type="file" id="fileInput" accept="*/*" multiple>
+      <div class="upload-icon">📂</div>
+      <div class="upload-title">Drop your legacy files here</div>
+      <div class="upload-sub" style="margin-bottom:3px;color:var(--text3)">
+        JCL · COBOL · any format, mixed together
+      </div>
+      <div class="upload-sub" style="color:var(--text3);font-size:10px;margin-bottom:6px">
+        Automatic language detection per file
+      </div>
+      <div class="upload-sub">ou <em onclick="document.getElementById('fileInput').click()">browse</em></div>
+    </div>
+
+    <button class="paste-toggle-btn" id="pasteToggleBtn">✎ Paste code directly</button>
+
+    <div class="paste-panel" id="pastePanel" style="display:none">
+      <textarea id="pasteTextarea" class="paste-textarea" placeholder="Paste your code (JCL, COBOL…) here — language will be detected automatically" spellcheck="false"></textarea>
+      <div class="paste-actions">
+        <input type="text" id="pasteFilename" class="paste-filename" placeholder="filename (optional)" />
+        <button class="paste-add-btn" id="pasteAddBtn">+ Add</button>
+      </div>
+    </div>
+
+    <div class="file-info" id="fileInfo">
+      <div id="fileListItems"></div>
+    </div>
+
+    <button class="parse-btn" id="parseBtn">▶ Analyze</button>
+
+    <div class="search-bar" id="searchBar" style="display:none">
+      <span class="search-icon">⌕</span>
+      <input class="search-input" id="searchInput" placeholder="Search nodes, files, programs…" autocomplete="off">
+      <span class="search-count" id="searchCount"></span>
+    </div>
+
+    <div class="export-bar" id="exportBar">
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text3)">Export:</span>
+      <button class="export-btn" id="exportSvgBtn">SVG</button>
+      <button class="export-btn" id="exportJsonBtn">JSON</button>
+      <button class="export-btn" id="exportCsvBtn">CSV</button>
+    </div>
+
+    <div class="stats-grid" id="statsGrid" style="display:none"></div>
+  </div>
+
+  <!-- RIGHT PANEL — onglets neutres, communs à tous les langages -->
+  <div class="right-panel">
+    <div class="tabs" id="mainTabs">
+      <div class="tab active" data-tab="map">System Map</div>
+      <div class="tab" data-tab="programs">Programmes</div>
+      <div class="tab" data-tab="data">Données</div>
+      <div class="tab" data-tab="flow">Flow</div>
+      <div class="tab" data-tab="source">Source</div>
+      <div class="tab" data-tab="translate" style="color:var(--purple)">⚡ Python</div>
+      <div class="tab" data-tab="summary">Summary</div>
+      <div class="tab" data-tab="debug" style="color:var(--red)">Frombug</div>
+    </div>
+
+    <div class="tab-content active scrollbar-custom" id="tab-map">
+      <div class="empty-state" id="emptyMap">
+        <div class="empty-icon">🗺</div>
+        <div class="empty-title">No system loaded</div>
+        <div class="empty-sub">Drop your JCL and/or COBOL files — the system map will appear here once analysis is complete.</div>
+      </div>
+      <div id="mapContainer" style="display:none"></div>
+    </div>
+
+    <div class="tab-content scrollbar-custom" id="tab-programs">
+      <div class="empty-state" id="emptyPrograms">
+        <div class="empty-icon">🖥</div>
+        <div class="empty-title">No program loaded</div>
+        <div class="empty-sub">JCL jobs and COBOL programs will appear here, regardless of their source language.</div>
+      </div>
+      <div id="programsContainer"></div>
+    </div>
+
+    <div class="tab-content scrollbar-custom" id="tab-data">
+      <div class="empty-state" id="emptyData">
+        <div class="empty-icon">🗂</div>
+        <div class="empty-title">No data detected</div>
+        <div class="empty-sub">JCL datasets, COBOL SELECT/FD files and data structures will appear here.</div>
+      </div>
+      <div id="dataContainer"></div>
+    </div>
+
+    <div class="tab-content scrollbar-custom" id="tab-flow">
+      <div class="empty-state" id="emptyFlow">
+        <div class="empty-icon">🔀</div>
+        <div class="empty-title">No flow computed</div>
+        <div class="empty-sub">Frompendencies between jobs, steps, and COBOL paragraphs (PERFORM / CALL / GOTO) will appear here.</div>
+      </div>
+      <div id="flowContainer" style="display:none"></div>
+    </div>
+
+    <div class="tab-content scrollbar-custom" id="tab-translate">
+      <div class="empty-state" id="emptyTranslate">
+        <div class="empty-icon">⚡</div>
+        <div class="empty-title">COBOL → Python Translation</div>
+        <div class="empty-sub">Analyze a COBOL file then select it here to generate equivalent Python code via AI.</div>
+      </div>
+      <div id="translateContainer" style="display:none">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+          <div class="section-title" style="margin:0;flex:1">COBOL → Python Translation</div>
+          <select id="translateFileSelect" style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:var(--bg3);color:var(--text2);border:1px solid var(--border);border-radius:4px;padding:4px 8px"></select>
+          <button id="translateBtn" style="padding:8px 16px;background:var(--purple);border:none;border-radius:6px;color:#fff;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;cursor:pointer;transition:all 0.2s">⚡ Translate</button>
+        </div>
+        <div id="translateStatus" style="display:none;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text2);margin-bottom:12px;padding:10px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:6px"></div>
+        <div id="translateOutput" style="display:none">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <div class="section-title" style="margin:0;flex:1">Code Python généré</div>
+            <button id="downloadPythonBtn" style="padding:5px 12px;background:transparent;border:1px solid var(--border2);border-radius:4px;color:var(--text2);font-family:'IBM Plex Mono',monospace;font-size:10px;cursor:pointer">⬇ .py</button>
+          <button id="copyPythonBtn" style="padding:5px 12px;background:transparent;border:1px solid var(--border2);border-radius:4px;color:var(--text2);font-family:'IBM Plex Mono',monospace;font-size:10px;cursor:pointer">📋 Copy</button>
+          </div>
+          <div id="pythonCode" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;line-height:1.75;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:14px;overflow-x:auto;white-space:pre;max-height:70vh;overflow-y:auto"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-content scrollbar-custom" id="tab-source">
+      <div class="empty-state" id="emptySource">
+        <div class="empty-icon">📄</div>
+        <div class="empty-title">No source loaded</div>
+        <div class="empty-sub">Select a file from the list to view its syntax-highlighted content.</div>
+      </div>
+      <div id="sourceContainer" style="display:none">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+          <div class="section-title" style="margin:0;flex:1">Source — syntax highlighting</div>
+          <select id="sourceFileSelect" style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:var(--bg3);color:var(--text2);border:1px solid var(--border);border-radius:4px;padding:4px 8px"></select>
+          <span id="srcEncBadge" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text3);background:var(--bg3);border:1px solid var(--border);border-radius:3px;padding:2px 8px"></span>
+        </div>
+        <div id="sourceHlCode" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;line-height:1.75;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:14px 0;overflow-x:auto"></div>
+      </div>
+    </div>
+
+    <div class="tab-content scrollbar-custom" id="tab-summary">
+      <div class="empty-state" id="emptySummary">
+        <div class="empty-icon">📋</div>
+        <div class="empty-title">Summary not available</div>
+        <div class="empty-sub">Run analysis to generate a system overview.</div>
+      </div>
+      <div id="summaryContainer" style="display:none"></div>
+    </div>
+
+    <div class="tab-content scrollbar-custom" id="tab-debug">
+      <div class="empty-state" id="emptyFrombug">
+        <div class="empty-icon">🔬</div>
+        <div class="empty-title">No analysis run yet</div>
+        <div class="empty-sub">The parsing log (JCL + COBOL) will appear here after analysis.</div>
+      </div>
+      <div id="debugContainer" style="display:none">
+        <div class="section-title" style="margin-bottom:12px">Parsing log</div>
+        <div id="debugLog" style="font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.9;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:16px;overflow-x:auto;overflow-y:auto;max-height:600px"></div>
+      </div>
+    </div>
+
+  </div><!-- right-panel -->
+</div><!-- workspace -->
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+//  PARSERS — JCL + COBOL (réutilisés, inchangés et déjà testés)
+// ═══════════════════════════════════════════════════════════════
+const EBCDIC_TO_ASCII = (() => {
+  const t = new Uint8Array(256);
+  // Remplissage : correspondances EBCDIC-037 (US/Europe occidentale)
+  const map = [
+    0x00,0x01,0x02,0x03,0x9C,0x09,0x86,0x7F,0x97,0x8D,0x8E,0x0B,0x0C,0x0D,0x0E,0x0F,
+    0x10,0x11,0x12,0x13,0x9D,0x85,0x08,0x87,0x18,0x19,0x92,0x8F,0x1C,0x1D,0x1E,0x1F,
+    0x80,0x81,0x82,0x83,0x84,0x0A,0x17,0x1B,0x88,0x89,0x8A,0x8B,0x8C,0x05,0x06,0x07,
+    0x90,0x91,0x16,0x93,0x94,0x95,0x96,0x04,0x98,0x99,0x9A,0x9B,0x14,0x15,0x9E,0x1A,
+    0x20,0xA0,0xE2,0xE4,0xE0,0xE1,0xE3,0xE5,0xE7,0xF1,0xA2,0x2E,0x3C,0x28,0x2B,0x7C,
+    0x26,0xE9,0xEA,0xEB,0xE8,0xED,0xEE,0xEF,0xEC,0xDF,0x21,0x24,0x2A,0x29,0x3B,0x5E,
+    0x2D,0x2F,0xC2,0xC4,0xC0,0xC1,0xC3,0xC5,0xC7,0xD1,0xA6,0x2C,0x25,0x5F,0x3E,0x3F,
+    0xF8,0xC9,0xCA,0xCB,0xC8,0xCD,0xCE,0xCF,0xCC,0x60,0x3A,0x23,0x40,0x27,0x3D,0x22,
+    0xD8,0x61,0x62,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0xAB,0xBB,0xF0,0xFD,0xFE,0xB1,
+    0xB0,0x6A,0x6B,0x6C,0x6D,0x6E,0x6F,0x70,0x71,0x72,0xAA,0xBA,0xE6,0xB8,0xC6,0xA4,
+    0xB5,0x7E,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0xA1,0xBF,0xD0,0x5B,0xDE,0xAE,
+    0xAC,0xA3,0xA5,0xB7,0xA9,0xA7,0xB6,0xBC,0xBD,0xBE,0xDD,0xA8,0xAF,0x5D,0xB4,0xD7,
+    0x7B,0x41,0x42,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0xAD,0xF4,0xF6,0xF2,0xF3,0xF5,
+    0x7D,0x4A,0x4B,0x4C,0x4D,0x4E,0x4F,0x50,0x51,0x52,0xB9,0xFB,0xFC,0xF9,0xFA,0xFF,
+    0x5C,0xF7,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A,0xB2,0xD4,0xD6,0xD2,0xD3,0xD5,
+    0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,0xB3,0xDB,0xDC,0xD9,0xDA,0x9F
+  ];
+  for (let i = 0; i < 256; i++) t[i] = map[i] || 0x3F; // 0x3F = '?'
+  return t;
+})();
+const FORMAT = {
+  JCL_PURE:       'JCL z/OS',
+  JCL_WIN_OPC:    'JCL hybride Windows/OPC',
+  JCL_BAT_HYBRID: 'BAT/JCL hybride',
+  EBCDIC:         'EBCDIC-037',
+  LATIN1:         'Latin-1',
+  UTF8:           'UTF-8',
+};
+const JCL_EXTENSIONS = new Set([
+  // IBM z/OS standard
+  'jcl','job','prc','proc','jcl2','jcllib',
+  // Contrôle & squelettes
+  'cntl','jclcntl','ctl','skel','skl',
+  // Texte mainframe générique
+  'txt','src','jes','jes2','jes3',
+  // Belfius / OPC / TWS (P01→P10)
+  'p01','p02','p03','p04','p05','p06','p07','p08','p09','p10',
+  // Lanceurs Windows hybrides
+  'bat','cmd','opcjcl',
+]);
+const COBOL_DIVISIONS = ['IDENTIFICATION','ENVIRONMENT','DATA','PROCEDURE'];
+const COBOL_EXTENSIONS = new Set(['cbl','cob','cobol','cpy','cpb','copybook']);
+
+function stripSequence(line) {
+  // CRLF Windows → LF, tabs → espaces
+  line = line.replace(/\r/g, '').replace(/\t/g, ' ');
+  // Numéros de séquence IBM cols 73-80
+  if (line.length >= 73) {
+    const seq = line.substring(72);
+    if (/^[A-Z0-9 ]+$/i.test(seq)) return line.substring(0, 72).trimEnd();
+  }
+  return line.trimEnd();
+}
+
+function joinContinuationLines(rawLines) {
+  const result = [];
+  let buf = null;
+  let continuing = false;
+
+  for (const raw of rawLines) {
+    const line = stripSequence(raw);
+
+    if (!line || line === '/*') {
+      if (buf !== null) { result.push(buf); buf = null; }
+      continuing = false;
+      result.push(line);
+      continue;
+    }
+    if (line.startsWith('//*')) {
+      if (buf !== null && !continuing) { result.push(buf); buf = null; }
+      result.push(line);
+      continue;
+    }
+    // Ligne de continuation : // suivi d'espace en col 3
+    if (continuing && line.startsWith('//') && line.length > 2 && line[2] === ' ') {
+      const cont = line.substring(3).trimStart();
+      buf = buf + cont;
+      continuing = buf.trimEnd().endsWith(',');
+      continue;
+    }
+    if (buf !== null) result.push(buf);
+    buf = line;
+    continuing = line.startsWith('//') && !line.startsWith('//*') && line.trimEnd().endsWith(',');
+  }
+  if (buf !== null) result.push(buf);
+  return result;
+}
+
+function tokenizeOperands(str) {
+  const tokens = [];
+  let i = 0;
+  const n = str.length;
+  while (i < n) {
+    while (i < n && str[i] === ' ') i++;
+    if (i >= n) break;
+    let key = '';
+    while (i < n && str[i] !== '=' && str[i] !== ',' && str[i] !== ' ') key += str[i++];
+    if (i >= n || str[i] === ',') {
+      if (key) tokens.push({ key: key.toUpperCase(), value: '' });
+      if (i < n) i++;
+      continue;
+    }
+    if (str[i] === '=') {
+      i++;
+      let value = '', depth = 0, inQ = false;
+      while (i < n) {
+        const ch = str[i];
+        if (inQ) {
+          value += ch;
+          if (ch === "'" && i+1 < n && str[i+1] === "'") { value += "'"; i += 2; continue; }
+          if (ch === "'") inQ = false;
+          i++; continue;
+        }
+        if (ch === "'") { inQ = true; value += ch; i++; continue; }
+        if (ch === '(') { depth++; value += ch; i++; continue; }
+        if (ch === ')') { if (depth === 0) break; depth--; value += ch; i++; continue; }
+        if ((ch === ',' || ch === ' ') && depth === 0) break;
+        value += ch; i++;
+      }
+      tokens.push({ key: key.toUpperCase(), value });
+      if (i < n && str[i] === ',') i++;
+      continue;
+    }
+    break;
+  }
+  return tokens;
+}
+
+function parseOperands(str) {
+  if (!str || !str.trim()) return {};
+  const tokens = tokenizeOperands(str.trim());
+  const params = {};
+  let posIdx = 0;
+  for (const tok of tokens) {
+    // Nettoyer les apostrophes wrappantes : 'valeur' → valeur
+    let val = tok.value;
+    if (val.startsWith("'") && val.endsWith("'") && val.length >= 2) {
+      val = val.slice(1, -1).replace(/''/g, "'"); // apostrophes doublées → simples
+    }
+    if (tok.value === '' && !str.includes(tok.key + '=')) {
+      params[`_POS${posIdx++}`] = tok.key;
+    } else {
+      params[tok.key] = val;
+    }
+  }
+  return params;
+}
+
+function parseStatement(line) {
+  const body = line.substring(2);
+  if (!body.trim()) return null;
+
+  // Keywords JCL IBM reconnus
+  const JCL_KEYWORDS = new Set(['JOB','EXEC','DD','PROC','PEND','IF','ELSE','ENDIF','SET','INCLUDE','JCLLIB','COMMAND','XMIT','OUTPUT']);
+
+  // Regex : nom 0-8 chars + keyword + opérandes
+  const m = body.match(/^([A-Z0-9@#$]{0,8}(?:\.[A-Z0-9@#$]{1,8})?)\s+(\S+)\s*(.*)?$/i);
+  if (!m) return null;
+
+  let rawName = m[1].toUpperCase();
+  let keyword  = m[2].toUpperCase();
+  let operands = (m[3] || '').trim();
+
+  // Cas OPC/non-standard : //JOB NAME=... ou //EXEC PGM=... sans nom de statement
+  // → le "nom" capturé EST le keyword (ex: name='JOB', kw='NAME=...')
+  // On le détecte si rawName est un keyword connu ET keyword ne l'est pas
+  if (JCL_KEYWORDS.has(rawName) && !JCL_KEYWORDS.has(keyword.split('=')[0])) {
+    // Reconstruire : nom vide, keyword = rawName, opérandes = keyword + ' ' + operands
+    operands = (keyword + (operands ? ' ' + operands : '')).trim();
+    keyword  = rawName;
+    rawName  = '';
+  }
+
+  // Vérifier que le keyword est bien un keyword JCL connu ou ressemble à un
+  // (évite de parser des lines de données comme des instructions)
+  if (!JCL_KEYWORDS.has(keyword)) {
+    // Accepter quand même — peut être un keyword non listé (NOTIFY, etc.)
+    // mais logger pour debug
+  }
+
+  // Rejeter les noms trop longs (> 8 chars hors notation STEP.DD)
+  if (rawName) {
+    const dotPos  = rawName.indexOf('.');
+    const baseName = dotPos >= 0 ? rawName.substring(0, dotPos) : rawName;
+    if (baseName.length > 8) return null;
+  }
+
+  return { name: rawName, keyword, operands };
+}
+
+function parseJCL(jclText) {
+  // Normaliser les fins de ligne
+  const rawLines = jclText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const lines    = joinContinuationLines(rawLines);
+
+  const jobs      = [];
+  const warnings  = [];
+  const debugLog  = []; // pour le mode debug
+  let currentJob  = null;
+  let currentStep = null;
+
+  const SYSTEM_PGMS = new Set([
+    'SORT','IEBGENER','IEBCOPY','IEBUPDTE','IDCAMS','IEFBR14',
+    'IKJEFT01','IRXJCL','DFSRRC00','DSNUTILB','IEBPTPCH',
+    'IEHPROGM','IEBCOMPR','IEHATLAS','IEHLIST','IEBISAM'
+  ]);
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+
+    if (!line.startsWith('//')) continue;
+    if (line.startsWith('//*')) continue;
+    if (line === '//') continue;
+
+    const stmt = parseStatement(line);
+    if (!stmt) {
+      debugLog.push(`SKIP (no match): ${line.substring(0, 60)}`);
+      continue;
+    }
+
+    const { keyword, operands } = stmt;
+
+    const dotIdx   = stmt.name.indexOf('.');
+    const stmtName = dotIdx >= 0 ? stmt.name.substring(0, dotIdx) : stmt.name;
+    const ddQual   = dotIdx >= 0 ? stmt.name.substring(dotIdx + 1) : null;
+
+    debugLog.push(`STMT: name=${stmtName} kw=${keyword} ops=${operands.substring(0,40)}`);
+
+    // ── JOB ─────────────────────────────────────────────────
+    if (keyword === 'JOB') {
+      const params = parseOperands(operands);
+      let pgmid    = params['_POS0'] || '';
+      if (pgmid.startsWith('(')) pgmid = pgmid.replace(/[()]/g, '').split(',')[0];
+
+      // Nom du job : stmtName en priorité, sinon NAME= (format OPC), sinon PDS=, sinon UNKNOWN
+      let jobName = stmtName;
+      if (!jobName && params.NAME) {
+        // Nettoyer les variables OPC §...§ → garder le literal ou utiliser tel quel
+        jobName = params.NAME.replace(/§[^§]*§/g, '').replace(/[^A-Z0-9@#$]/gi, '').substring(0, 8) || 'OPCJOB';
+      }
+      if (!jobName) jobName = 'UNKNOWN';
+
+      currentJob = {
+        name:     jobName.toUpperCase(),
+        pgmid,
+        title:    (params['_POS1'] || params.NAME || '').replace(/'/g, ''),
+        class:    params.CLASS    || '',
+        msgclass: params.MSGCLASS || '',
+        notify:   params.NOTIFY   || '',
+        time:     params.TIME     || '',
+        region:   params.REGION   || '',
+        params,
+        steps:    [],
+        joblibs:  [],
+        synthetic: false,
+        rawLine:  line
+      };
+      jobs.push(currentJob);
+      currentStep = null;
+
+    // ── EXEC ─────────────────────────────────────────────────
+    } else if (keyword === 'EXEC') {
+      // Si pas de JOB courant → créer un job synthétique nommé d'après le fichier
+      if (!currentJob) {
+        currentJob = {
+          name:      '_IMPLICIT',
+          pgmid:     '',
+          title:     'Implicit job (no //JOB detected)',
+          class:     '', msgclass: '', notify: '', time: '', region: '',
+          params:    {},
+          steps:     [],
+          joblibs:   [],
+          synthetic: true,
+          rawLine:   ''
+        };
+        jobs.push(currentJob);
+        warnings.push('No //JOB found — steps attached to implicit job');
+      }
+      const params    = parseOperands(operands);
+      let execType    = 'PROC';
+      let execTarget  = '';
+
+      if (params.PGM)  { execType = 'PGM';  execTarget = params.PGM; }
+      else if (params.PROC) { execType = 'PROC'; execTarget = params.PROC; }
+      else {
+        const pos0 = params['_POS0'] || '';
+        if      (pos0.toUpperCase().startsWith('PGM='))  { execType = 'PGM';  execTarget = pos0.substring(4); }
+        else if (pos0.toUpperCase().startsWith('PROC=')) { execType = 'PROC'; execTarget = pos0.substring(5); }
+        else if (pos0) { execType = 'PROC'; execTarget = pos0; }
+      }
+
+      currentStep = {
+        name:        stmtName,
+        execType,
+        execTarget:  execTarget.toUpperCase(),
+        isSystemPgm: execType === 'PGM' && SYSTEM_PGMS.has(execTarget.toUpperCase()),
+        cond:        params.COND   || null,
+        parm:        params.PARM   || null,
+        time:        params.TIME   || null,
+        region:      params.REGION || null,
+        params,
+        dds:         [],
+        rawLine:     line
+      };
+      currentJob.steps.push(currentStep);
+
+    // ── DD ───────────────────────────────────────────────────
+    } else if (keyword === 'DD') {
+      const params  = parseOperands(operands);
+      const ddName  = (ddQual || stmtName).toUpperCase();
+      const refStep = ddQual ? stmtName : null;
+
+      const dd = {
+        ddName,
+        refStep,
+        dsn:    'DSN'    in params ? params.DSN    : null,
+        disp:   'DISP'   in params ? params.DISP   : null,
+        sysout: 'SYSOUT' in params ? params.SYSOUT : null,
+        space:  'SPACE'  in params ? params.SPACE  : null,
+        dcb:    'DCB'    in params ? params.DCB    : null,
+        unit:   'UNIT'   in params ? params.UNIT   : null,
+        vol:    'VOL'    in params ? params.VOL    : null,
+        dummy:  params['_POS0'] === 'DUMMY' || 'DUMMY' in params,
+        rawLine: line
+      };
+
+      if (!currentStep) {
+        if (currentJob) currentJob.joblibs.push(dd);
+        continue;
+      }
+      if (refStep) {
+        const ts = currentJob ? currentJob.steps.find(s => s.name === refStep) : null;
+        if (ts) { ts.dds.push(dd); continue; }
+      }
+      currentStep.dds.push(dd);
+
+    } else if (['PROC','PEND','IF','ELSE','ENDIF','SET','INCLUDE'].includes(keyword)) {
+      // Ignoré silencieusement pour l'instant
+    } else {
+      debugLog.push(`UNKNOWN keyword: ${keyword} on line: ${line.substring(0,60)}`);
+    }
+  }
+
+  return { jobs, warnings, debugLog };
+}
+
+function classifyDsn(ds) {
+  const n = ds.dsn.toUpperCase();
+  const d = (ds.disp || '').toUpperCase();
+  if (n.includes('.VSAM.') || ds.ddName === 'VSAM' || n.endsWith('.KSDS') || n.endsWith('.ESDS'))
+    return 'vsam';
+  if (ds.sysout)   return 'sysout';
+  if (d.startsWith('(NEW') || d === 'NEW' || (d.includes('NEW') && d.includes('CATLG')))
+    return 'output';
+  return 'input';
+}
+
+function extractAllDatasets(jobs) {
+  const dsMap = {};
+  const addDs = (dd, jobName, stepName) => {
+    if (!dd.dsn) return;
+    const dsn = dd.dsn.trim();
+    if (!dsMap[dsn]) dsMap[dsn] = { dsn, disp: dd.disp, space: dd.space, dcb: dd.dcb, unit: dd.unit, usages: [] };
+    dsMap[dsn].usages.push({
+      job: jobName, step: stepName, dd: dd.ddName,
+      access: dd.disp && dd.disp.toUpperCase().includes('NEW') ? 'WRITE' : 'READ'
+    });
+    if (!dsMap[dsn].disp && dd.disp) dsMap[dsn].disp = dd.disp;
+  };
+  for (const job of jobs) {
+    for (const dd of (job.joblibs || [])) addDs(dd, job.name, 'JOBLIB');
+    for (const step of job.steps)
+      for (const dd of step.dds) addDs(dd, job.name, step.name);
+  }
+  return Object.values(dsMap).map(ds => ({ ...ds, type: classifyDsn(ds) }));
+}
+
+function stripCobolLine(line) {
+  line = line.replace(/\r/g, '').replace(/\t/g, ' ');
+  // Détection format fixe : si la ligne fait 80 chars typiques avec
+  // une zone identification en 73-80, on la retire (rare en fichiers modernes)
+  if (line.length > 72) {
+    const tail = line.substring(72);
+    // Heuristique : zone ID souvent vide ou numérique
+    if (/^[\sA-Z0-9]{0,8}$/i.test(tail) && line.length >= 73) {
+      // On ne tronque QUE si col 7 ressemble à un indicateur valide (espace, *, /, -)
+      const indicator = line[6];
+      if (indicator === '*' || indicator === '/' || indicator === '-' || indicator === ' ' || indicator === undefined) {
+        line = line.substring(0, 72);
+      }
+    }
+  }
+  return line.trimEnd();
+}
+
+function isCobolCommentLine(line) {
+  // Indicateur '*' ou '/' en colonne 7 (index 6) = commentaire
+  if (line.length >= 7 && (line[6] === '*' || line[6] === '/')) return true;
+  // Format libre : ligne commençant par '*>' (COBOL 2002+)
+  if (/^\s*\*>/.test(line)) return true;
+  return false;
+}
+
+function splitDivisions(lines) {
+  const divisions = { IDENTIFICATION: [], ENVIRONMENT: [], DATA: [], PROCEDURE: [] };
+  let current = null;
+  const debugLog = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (isCobolCommentLine(raw)) continue;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+
+    const divMatch = trimmed.match(/^([A-Z-]+)\s+DIVISION\s*\.?/i);
+    if (divMatch) {
+      const divName = divMatch[1].toUpperCase();
+      if (COBOL_DIVISIONS.includes(divName)) {
+        current = divName;
+        debugLog.push(`DIVISION trouvée: ${divName} (ligne ${i+1})`);
+        continue;
+      }
+    }
+    if (current) divisions[current].push({ line: trimmed, lineNum: i + 1, raw });
+  }
+  return { divisions, debugLog };
+}
+
+function parseEnvironmentDivision(lines) {
+  const selects = [];
+  const fullText = lines.map(l => l.line).join(' ');
+  // Découper sur chaque "SELECT" pour isoler les blocs
+  const blocks = fullText.split(/(?=\bSELECT\b)/i).filter(b => /^\s*SELECT\b/i.test(b));
+
+  for (const block of blocks) {
+    const nameMatch = block.match(/SELECT\s+(?:OPTIONAL\s+)?([\w-]+)/i);
+    const assignMatch = block.match(/ASSIGN\s+(?:TO\s+)?(?:DISK\s+)?['"]?([\w.\-§]+)['"]?/i);
+    const orgMatch = block.match(/ORGANIZATION\s+(?:IS\s+)?([\w-]+)/i);
+    const accessMatch = block.match(/ACCESS\s+(?:MODE\s+)?(?:IS\s+)?([\w-]+)/i);
+    const fileStatusMatch = block.match(/FILE\s+STATUS\s+(?:IS\s+)?([\w-]+)/i);
+    const isOptional = /\bOPTIONAL\b/i.test(block);
+
+    if (nameMatch) {
+      selects.push({
+        fileName:    nameMatch[1].toUpperCase(),
+        assignTo:    assignMatch ? assignMatch[1].toUpperCase() : null,
+        organization: orgMatch ? orgMatch[1].toUpperCase() : 'SEQUENTIAL',
+        access:      accessMatch ? accessMatch[1].toUpperCase() : 'SEQUENTIAL',
+        fileStatus:  fileStatusMatch ? fileStatusMatch[1].toUpperCase() : null,
+        optional:    isOptional,
+      });
+    }
+  }
+  return selects;
+}
+
+function parseDataDivision(lines) {
+  const fds       = [];   // File Fromscriptions (FD/SD)
+  const wsItems    = [];   // WORKING-STORAGE items (niveau + nom + PIC + VALUE)
+  const copyBooks = [];   // COPY statements
+  let currentFD   = null;
+  let section     = null; // FILE / WORKING-STORAGE / LINKAGE
+
+  const fullLines = lines.map(l => l.line);
+
+  for (let i = 0; i < fullLines.length; i++) {
+    const text = fullLines[i];
+
+    // Détection de section
+    if (/^FILE\s+SECTION/i.test(text))            { section = 'FILE'; continue; }
+    if (/^WORKING-STORAGE\s+SECTION/i.test(text))  { section = 'WORKING-STORAGE'; continue; }
+    if (/^LINKAGE\s+SECTION/i.test(text))          { section = 'LINKAGE'; continue; }
+
+    // COPY statement (copybook inclus)
+    const copyMatch = text.match(/^\s*(?:\d+\s+)?COPY\s+([\w-]+)(?:\s+REPLACING\s+(.*))?/i);
+    if (copyMatch) {
+      copyBooks.push({ name: copyMatch[1].toUpperCase(), replacing: copyMatch[2] || null, lineNum: lines[i].lineNum });
+      continue;
+    }
+
+    // FD / SD (File/Sort Fromscription)
+    const fdMatch = text.match(/^(FD|SD)\s+([\w-]+)/i);
+    if (fdMatch) {
+      currentFD = {
+        type: fdMatch[1].toUpperCase(), // FD ou SD
+        fileName: fdMatch[2].toUpperCase(),
+        records: [],
+        lineNum: lines[i].lineNum
+      };
+      fds.push(currentFD);
+      continue;
+    }
+
+    // Niveau de donnée : 01, 05, 10, 15, ... 49, 66, 77, 88
+    const levelMatch = text.match(/^(\d{1,2})\s+([\w-]+|FILLER)\s*(.*)/i);
+    if (levelMatch) {
+      const level   = parseInt(levelMatch[1], 10);
+      const name    = levelMatch[2].toUpperCase();
+      const rest    = levelMatch[3] || '';
+      const picMatch = rest.match(/PIC(?:TURE)?\s+(?:IS\s+)?([\w()\.+\-,S$Z9XAV]+)/i);
+      const valueMatch = rest.match(/VALUE\s+(?:IS\s+)?(['"][^'"]*['"]|[\w.+\-]+)/i);
+      const occursMatch = rest.match(/OCCURS\s+(\d+)/i);
+      const usageMatch = rest.match(/USAGE\s+(?:IS\s+)?([\w-]+)|\b(COMP-?\d?|BINARY|PACKED-DECIMAL|DISPLAY)\b/i);
+
+      const item = {
+        level, name,
+        pic:     picMatch ? picMatch[1] : null,
+        value:   valueMatch ? valueMatch[1].replace(/['"]/g, '') : null,
+        occurs:  occursMatch ? parseInt(occursMatch[1], 10) : null,
+        usage:   usageMatch ? (usageMatch[1] || usageMatch[2] || '').toUpperCase() : null,
+        lineNum: lines[i].lineNum
+      };
+
+      if (section === 'FILE' && currentFD) {
+        currentFD.records.push(item);
+      } else if (section === 'WORKING-STORAGE' || section === 'LINKAGE') {
+        wsItems.push({ ...item, section });
+      }
+      continue;
+    }
+  }
+
+  return { fds, wsItems, copyBooks };
+}
+
+function parseProcedureDivision(lines) {
+  const sections   = [];  // { name, paragraphs: [...] }
+  const paragraphs = [];  // liste plate de tous les paragraphes
+  const calls      = [];  // { from, target, type: PERFORM|CALL|GOTO, lineNum }
+
+  let currentSection   = null;
+  let currentParagraph  = null;
+
+  const fullLines = lines.map(l => ({ text: l.line, lineNum: l.lineNum }));
+
+  for (const { text, lineNum } of fullLines) {
+    // SECTION (ex: "0100-MAIN SECTION.")
+    const secMatch = text.match(/^([\w-]+)\s+SECTION\s*\.?/i);
+    if (secMatch) {
+      currentSection = { name: secMatch[1].toUpperCase(), paragraphs: [], lineNum };
+      sections.push(currentSection);
+      currentParagraph = null;
+      continue;
+    }
+
+    // PARAGRAPHE : un identifiant seul suivi d'un point, en début de ligne,
+    // qui n'est pas un verbe COBOL connu
+    const COBOL_VERBS = new Set([
+      'MOVE','IF','ELSE','END-IF','PERFORM','CALL','GOTO','GO','STOP','EXIT',
+      'DISPLAY','ACCEPT','COMPUTE','ADD','SUBTRACT','MULTIPLY','DIVIDE',
+      'OPEN','CLOSE','READ','WRITE','REWRITE','DELETE','START',
+      'STRING','UNSTRING','INSPECT','INITIALIZE','SET','SEARCH',
+      'EVALUATE','WHEN','END-EVALUATE','END-PERFORM','CONTINUE','NEXT'
+    ]);
+    const paraMatch = text.match(/^([\w-]+)\s*\.\s*$/);
+    if (paraMatch && !COBOL_VERBS.has(paraMatch[1].toUpperCase())) {
+      currentParagraph = { name: paraMatch[1].toUpperCase(), lineNum, calls: [] };
+      paragraphs.push(currentParagraph);
+      if (currentSection) currentSection.paragraphs.push(currentParagraph);
+      continue;
+    }
+
+    // PERFORM target [THRU target2]
+    const performMatch = text.match(/PERFORM\s+([\w-]+)(?:\s+THRU\s+([\w-]+))?/i);
+    if (performMatch && currentParagraph) {
+      const target = performMatch[1].toUpperCase();
+      calls.push({ from: currentParagraph.name, target, type: 'PERFORM', lineNum });
+      currentParagraph.calls.push({ target, type: 'PERFORM' });
+    }
+
+    // CALL 'PROGRAM' ou CALL PROGRAM-VAR
+    const callMatch = text.match(/CALL\s+['"]?([\w-]+)['"]?/i);
+    if (callMatch && currentParagraph) {
+      const target = callMatch[1].toUpperCase();
+      calls.push({ from: currentParagraph.name, target, type: 'CALL', lineNum });
+      currentParagraph.calls.push({ target, type: 'CALL' });
+    }
+
+    // GOTO / GO TO target
+    const gotoMatch = text.match(/GO\s+TO\s+([\w-]+)/i);
+    if (gotoMatch && currentParagraph) {
+      const target = gotoMatch[1].toUpperCase();
+      calls.push({ from: currentParagraph.name, target, type: 'GOTO', lineNum });
+      currentParagraph.calls.push({ target, type: 'GOTO' });
+    }
+  }
+
+  return { sections, paragraphs, calls };
+}
+
+function parseCOBOL(cobolText, sourceFileName) {
+  const rawLines = cobolText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const cleaned  = rawLines.map(stripCobolLine);
+
+  const { divisions, debugLog } = splitDivisions(cleaned);
+
+  // IDENTIFICATION DIVISION → nom du programme
+  const idText = divisions.IDENTIFICATION.map(l => l.line).join(' ');
+  const pgmIdMatch = idText.match(/PROGRAM-ID\.\s*([\w-]+)/i);
+  const authorMatch = idText.match(/AUTHOR\.\s*([A-Z0-9 .,'\-]+?)(?:\s*(?:DATE-WRITTEN|DATE-COMPILED|INSTALLATION|SECURITY)\.|\.\s*$|\.\s+[A-Z]+-[A-Z]+\.|$)/i);
+
+  const programName = pgmIdMatch ? pgmIdMatch[1].toUpperCase() : (sourceFileName || 'UNKNOWN').replace(/\.[^.]+$/, '').toUpperCase();
+
+  const selects = parseEnvironmentDivision(divisions.ENVIRONMENT);
+  const { fds, wsItems, copyBooks } = parseDataDivision(divisions.DATA);
+  const { sections, paragraphs, calls } = parseProcedureDivision(divisions.PROCEDURE);
+
+  debugLog.push(`PROGRAM-ID: ${programName}`);
+  debugLog.push(`SELECT statements: ${selects.length}`);
+  debugLog.push(`FD/SD: ${fds.length}`);
+  debugLog.push(`Items WORKING-STORAGE: ${wsItems.length}`);
+  debugLog.push(`COPY books: ${copyBooks.length}`);
+  debugLog.push(`Sections: ${sections.length}, Paragraphes: ${paragraphs.length}`);
+  debugLog.push(`Appels (PERFORM/CALL/GOTO): ${calls.length}`);
+
+  // Croiser SELECT (assign) avec FD (structure) sur le nom de fichier
+  const files = selects.map(sel => {
+    const fd = fds.find(f => f.fileName === sel.fileName);
+    return {
+      ...sel,
+      recordCount: fd ? fd.records.length : 0,
+      records: fd ? fd.records : [],
+      fdType: fd ? fd.type : null,
+    };
+  });
+
+  return {
+    programName,
+    author: authorMatch ? authorMatch[1].trim() : null,
+    sourceFile: sourceFileName,
+    files,
+    wsItems,
+    copyBooks,
+    sections,
+    paragraphs,
+    calls,
+    divisionsFound: COBOL_DIVISIONS.filter(d => divisions[d].length > 0),
+    debugLog,
+    warnings: [],
+  };
+}
+
+function ebcdicToString(bytes) {
+  const chars = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) chars[i] = EBCDIC_TO_ASCII[bytes[i]];
+  return new TextDecoder('latin1').decode(chars);
+}
+
+function detectFormat(text) {
+  const lines = text.split('\n');
+
+  // Marqueurs OPC/TWS (Tivoli Workload Scheduler)
+  const hasOPC     = lines.some(l => /\/\/\*%OPC/i.test(l));
+  // Lignes REM ou SET typiques d'un BAT
+  const hasREM     = lines.some(l => /^\s*REM\b/i.test(l));
+  const hasSET     = lines.some(l => /^\s*SET\s+\w+=/i.test(l));
+  // Variables §...§ (OPC symbolic)
+  const hasOPCSym  = /§[^§]+§/.test(text);
+  // rem  //JOB  (ligne JCL dans un commentaire BAT)
+  const hasRemJob  = lines.some(l => /^\s*rem\s+\/\//i.test(l));
+  // Ligne // standard
+  const hasStdJCL  = lines.some(l => /^\/\//.test(l));
+  // Chemin Windows %VAR%\...
+  const hasWinPath = /%\w+%\\/.test(text);
+
+  if (hasOPC || hasRemJob || (hasREM && hasOPCSym)) {
+    return FORMAT.JCL_WIN_OPC;
+  }
+  if (hasREM && hasSET && !hasStdJCL) {
+    return FORMAT.JCL_BAT_HYBRID;
+  }
+  if (hasStdJCL) {
+    return FORMAT.JCL_PURE;
+  }
+  return null; // inconnu
+}
+
+function normalizeToJCL(text, format) {
+  if (format === FORMAT.JCL_PURE) return { jcl: text, notes: [] };
+
+  const notes = [];
+  const lines = text.split('\n');
+  const out   = [];
+
+  // Résoudre les variables §VAR§ connues (OPC/TWS symbolics)
+  // On les laisse telles quelles mais on les log
+  const symbols = new Set();
+  const symRe = /§([^§]+)§/g;
+  let m;
+  while ((m = symRe.exec(text)) !== null) symbols.add(m[1]);
+  if (symbols.size > 0) {
+    notes.push(`Variables OPC détectées : ${[...symbols].map(s => `§${s}§`).join(', ')}`);
+  }
+
+  // ── Étape 0 : joindre les continuations Windows ^ ─────────────
+  // Ex : "batexec ^\nQW1PWA1A.bat" → "batexec QW1PWA1A.bat"
+  const joinedLines = [];
+  for (let i = 0; i < lines.length; i++) {
+    const raw  = lines[i];
+    const trim = raw.trimEnd();
+    if (trim.endsWith('^') && i + 1 < lines.length) {
+      // Joindre avec la ligne suivante (sans le ^)
+      lines[i + 1] = trim.slice(0, -1).trim() + ' ' + lines[i + 1].trim();
+      continue; // ne pas ajouter cette ligne, elle sera fusionnée
+    }
+    joinedLines.push(raw);
+  }
+
+  for (let i = 0; i < joinedLines.length; i++) {
+    const raw  = joinedLines[i];
+    const trim = raw.trim();
+
+    // 1. Ligne vide
+    if (!trim) { out.push(''); continue; }
+
+    // 2. rem  //XXXX ... → extraire la ligne JCL embedded
+    if (/^\s*rem\s+\/\//i.test(trim)) {
+      const jclPart = trim.replace(/^\s*rem\s+/i, '');
+      out.push(jclPart);
+      notes.push(`Ligne ${i+1}: JCL extrait depuis commentaire REM`);
+      continue;
+    }
+
+    // 3. //*%OPC directives → commentaire JCL avec tag [OPC]
+    if (/^\/\/\*%OPC/i.test(trim)) {
+      out.push(`//* [OPC] ${trim.substring(7)}`);
+      continue;
+    }
+
+    // 4. Lignes // standard → garder telles quelles
+    if (trim.startsWith('//')) {
+      out.push(trim);
+      continue;
+    }
+
+    // 5. REM / commentaires BAT → commentaire JCL
+    if (/^REM\b/i.test(trim) || trim.startsWith('::')) {
+      const comment = trim.replace(/^(REM\s*|::)/i, '').trim();
+      if (comment && !/^-+$/.test(comment)) { // ignorer les séparateurs "---"
+        out.push(`//* ${comment.substring(0, 60)}`);
+      }
+      continue;
+    }
+
+    // 6. SET VAR=value → commentaire JCL avec info
+    const setMatch = trim.match(/^SET\s+(\w+)=(.*)$/i);
+    if (setMatch) {
+      out.push(`//* SET ${setMatch[1]}=${setMatch[2].substring(0, 50)}`);
+      continue;
+    }
+
+    // 7. Toute autre commande BAT (IF, GOTO, EXIT, appels, chemins...)
+    const safe = trim.replace(/[^\x20-\x7E]/g, '?').substring(0, 60);
+    out.push(`//* [BAT] ${safe}`);
+  }
+
+  return { jcl: out.join('\n'), notes };
+}
+
+// Extensions JCL "fortes" (sans ambiguïté) — exclut les extensions neutres
+// comme .txt/.bat/.cmd qui nécessitent toujours une vérification du contenu
+const JCL_STRONG_EXTENSIONS = new Set([...JCL_EXTENSIONS].filter(e => !['txt','bat','cmd'].includes(e)));
+
+function isLikelyJCL(filename, text) {
+  // 1. Extension JCL forte et sans ambiguïté → on tente toujours
+  const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+  if (JCL_STRONG_EXTENSIONS.has(ext) && !COBOL_EXTENSIONS.has(ext)) return true;
+  // 2. Pas d'extension, ou extension neutre (.txt/.bat/.cmd) → exiger un vrai signal JCL
+  return hasJCLSignal(text);
+}
+
+// Signaux forts et spécifiques au JCL (utilisés pour la détection de LANGAGE,
+// à ne pas confondre avec looksLikeText qui sert à valider un ENCODAGE).
+function hasJCLSignal(text) {
+  if (/^\/\//m.test(text))               return true; // lines // standard
+  if (/^\s*rem\s+\/\//im.test(text))     return true; // rem //JOB OPC
+  if (/\/\/\*%OPC/im.test(text))         return true; // directives OPC/TWS
+  if (/§[^§]+§/.test(text))              return true; // variables OPC §VAR§
+  if (/EXEC\s+PGM=/im.test(text))        return true; // EXEC PGM= sans //
+  if (/\bDISP=\(?(SHR|OLD|NEW)/im.test(text)) return true; // DD statements
+  return false;
+}
+
+// Détecteur d'encoding générique : sert uniquement à valider qu'un buffer
+// décodé ressemble à du texte exploitable (utilisé par detectAndDecode),
+// PAS à déterminer un langage — ne jamais utiliser pour isLikelyJCL/COBOL.
+function looksLikeText(text) {
+  if (hasJCLSignal(text))              return true;
+  if (/^\s*REM\b/im.test(text))        return true; // BAT REM générique
+  if (/IDENTIFICATION\s+DIVISION/i.test(text)) return true;
+  if (/PROGRAM-ID\s*\./i.test(text))   return true;
+  // Fallback : texte lisible (< 10% de caractères de contrôle non-imprimables)
+  const ctrl = (text.match(/[\x00-\x08\x0E-\x1F]/g) || []).length;
+  return ctrl / text.length < 0.10;
+}
+
+
+
+function isLikelyCOBOL(filename, text) {
+  const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+  if (COBOL_EXTENSIONS.has(ext)) return true;
+  if (/IDENTIFICATION\s+DIVISION/i.test(text)) return true;
+  if (/PROGRAM-ID\s*\./i.test(text)) return true;
+  if (/PROCEDURE\s+DIVISION/i.test(text)) return true;
+  return false;
+}
+
+function tokenizeLine(raw) {
+  // Échappe HTML d'abord
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  // Ligne vide
+  if (!raw.trim()) return esc(raw);
+
+  // Ligne de données inline (pas //)
+  if (!raw.startsWith('//')) {
+    return `<span class="t-val">${esc(raw)}</span>`;
+  }
+
+  // Délimiteur fin de données /*
+  if (raw.startsWith('/*')) {
+    return `<span class="t-delim">${esc(raw)}</span>`;
+  }
+
+  // Commentaire //*
+  if (raw.startsWith('//*')) {
+    return `<span class="t-slash">//</span><span class="t-comment">*${esc(raw.slice(3))}</span>`;
+  }
+
+  // Ligne JCL normale : //[name]  KEYWORD  operands
+  const slashes = `<span class="t-slash">//</span>`;
+  const body = raw.slice(2);
+
+  // Continuation (col 3 = espace et on est dans une suite)
+  // On détecte par : pas de keyword reconnu en col 3-12
+  const stmtRe = /^([A-Z0-9@#$.]{0,17})\s+(JOB|EXEC|DD|PROC|PEND|IF|ELSE|ENDIF|SET)\b/i;
+  const m = body.match(stmtRe);
+
+  if (!m) {
+    // Ligne de continuation des opérandes
+    return slashes + colorOperands(body);
+  }
+
+  const nameRaw = m[1];
+  const kw      = m[2].toUpperCase();
+  const rest    = body.slice(m[0].length);
+
+  // Colorier le nom (label)
+  const namePart = nameRaw
+    ? `<span class="t-label">${esc(nameRaw)}</span>`
+    : '';
+
+  // Espaces entre nom et keyword
+  const gap1 = body.slice(nameRaw.length, body.indexOf(kw, nameRaw.length));
+
+  // Keyword couleur selon type
+  const kwClass = kw === 'JOB' ? 't-kw-job'
+    : kw === 'EXEC' ? 't-kw-exec'
+    : kw === 'DD'   ? 't-kw-dd'
+    : 't-kw-other';
+  const kwPart = `<span class="${kwClass}">${kw}</span>`;
+
+  // Colorier les opérandes
+  const opPart = colorOperands(rest, kw);
+
+  return slashes + namePart + esc(gap1) + kwPart + opPart;
+}
+
+function colorOperands(str, kw) {
+  if (!str || !str.trim()) return '';
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  // Tokenize caractère par caractère pour colorer clés/valeurs/strings
+  let out = '';
+  let i = 0;
+  const n = str.length;
+
+  // Espaces initiaux (entre keyword et opérandes)
+  while (i < n && str[i] === ' ') { out += str[i++]; }
+
+  while (i < n) {
+    const ch = str[i];
+
+    // Commentaire inline (espace + texte après dernier opérande)
+    // On ne peut pas le détecter facilement ici, on laisse passer
+
+    // Apostrophe = string JCL
+    if (ch === "'") {
+      let s = "'";
+      i++;
+      while (i < n) {
+        s += str[i];
+        if (str[i] === "'" && (i+1 >= n || str[i+1] !== "'")) { i++; break; }
+        if (str[i] === "'" && str[i+1] === "'") { s += "'"; i += 2; continue; }
+        i++;
+      }
+      out += `<span class="t-str">${esc(s)}</span>`;
+      continue;
+    }
+
+    // Variable symbolique &SYM
+    if (ch === '&') {
+      let s = '&';
+      i++;
+      while (i < n && /[A-Z0-9@#$_]/i.test(str[i])) s += str[i++];
+      out += `<span class="t-sym">${esc(s)}</span>`;
+      continue;
+    }
+
+    // Lire un token clé=valeur ou valeur positionnelle
+    // Lire jusqu'à = ou , ou ( ou espace
+    let token = '';
+    while (i < n && str[i] !== '=' && str[i] !== ',' && str[i] !== ' ') {
+      token += str[i++];
+    }
+
+    if (!token) { out += esc(str[i] || ''); i++; continue; }
+
+    if (i < n && str[i] === '=') {
+      // C'est une clé
+      const keyUp = token.toUpperCase();
+      const keyClass = keyUp === 'DSN'    ? 't-dsn'
+        : keyUp === 'SYSOUT' ? 't-sysout'
+        : keyUp === 'PGM'    ? 't-pgm'
+        : keyUp === 'PROC'   ? 't-proc-val'
+        : 't-key';
+      out += `<span class="${keyClass}">${esc(token)}</span><span class="t-slash">=</span>`;
+      i++; // consommer =
+
+      // Lire la valeur (gère parens + strings)
+      let val = '';
+      let depth = 0;
+      let inQ = false;
+      while (i < n) {
+        const c = str[i];
+        if (inQ) {
+          val += c;
+          if (c === "'" && i+1 < n && str[i+1] === "'") { val += "'"; i += 2; continue; }
+          if (c === "'") { inQ = false; }
+          i++; continue;
+        }
+        if (c === "'") { inQ = true; val += c; i++; continue; }
+        if (c === '(') { depth++; val += c; i++; continue; }
+        if (c === ')') {
+          if (depth === 0) break;
+          depth--; val += c; i++; continue;
+        }
+        if (c === ',' && depth === 0) break;
+        if (c === ' ' && depth === 0) break;
+        val += c; i++;
+      }
+
+      // Colorier la valeur selon la clé
+      const valClass = keyUp === 'DSN' ? 't-dsn'
+        : keyUp === 'SYSOUT' ? 't-sysout'
+        : keyUp === 'PGM'    ? 't-pgm'
+        : keyUp === 'PROC'   ? 't-proc-val'
+        : 't-val';
+      out += `<span class="${valClass}">${esc(val)}</span>`;
+
+    } else {
+      // Valeur positionnelle
+      out += `<span class="t-val">${esc(token)}</span>`;
+    }
+
+    // Virgule séparatrice ou espace
+    if (i < n && str[i] === ',') {
+      out += `<span class="t-slash">,</span>`;
+      i++;
+    } else if (i < n && str[i] === ' ') {
+      out += ' '; i++;
+    }
+  }
+
+  return out;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ÉTAT GLOBAL UNIFIÉ
+//  Un seul magasin de fichiers, quel que soit le langage.
+//  loadedFiles = {
+//    'PROG.CBL': {
+//      content: '...',      // texte brut décodé
+//      encoding: 'UTF-8',
+//      language: 'cobol',   // 'jcl' | 'cobol' | 'unknown'
+//      ext, knownExt, size, warning, notes, pasted,
+//      parsed: { ... }      // résultat du parser spécifique, rempli après analyse
+//    },
+//    'DAILYBAT.JCL': { ... language: 'jcl' ... }
+//  }
+// ═══════════════════════════════════════════════════════════════
+let loadedFiles = {};
+
+// ── Détection de langage — point d'entrée unique ──────────────
+// Retourne 'jcl' | 'cobol' | 'unknown'
+function detectLanguage(filename, text) {
+  const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+
+  // 1. Extension sans ambiguïté
+  if (COBOL_EXTENSIONS.has(ext)) return 'cobol';
+  if (JCL_STRONG_EXTENSIONS.has(ext)) return 'jcl';
+
+  // 2. Extension neutre (.txt/.bat/.cmd) ou absente → analyser le contenu
+  const looksCobol = isLikelyCOBOL(filename, text);
+  const looksJcl   = isLikelyJCL(filename, text);
+
+  if (looksCobol && !looksJcl) return 'cobol';
+  if (looksJcl && !looksCobol) return 'jcl';
+
+  // 3. Les deux ou ni l'un ni l'autre → contenu ambigu, trancher sur signaux forts
+  if (looksCobol) return 'cobol'; // PROGRAM-ID/DIVISION priment si présents
+  if (looksJcl)   return 'jcl';
+
+  return 'unknown';
+}
+
+// ── Chargement et normalisation d'un fichier — point d'entrée unique ──
+// Quel que soit le langage détecté, on stocke dans loadedFiles avec
+// la même forme. Le contenu JCL est normalisé (OPC/BAT hybride →
+// JCL pur) ; le contenu COBOL est gardé tel quel (le parser COBOL
+// gère directement le format fixe/libre).
+// ── Détection d'encodage + décodage ArrayBuffer ───────────────
+// Essaie UTF-8 strict → Latin-1 → EBCDIC-037 → fallback Latin-1
+function detectAndDecode(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  // BOM UTF-8 ?
+  const hasBOM = bytes[0]===0xEF && bytes[1]===0xBB && bytes[2]===0xBF;
+  const buf    = hasBOM ? arrayBuffer.slice(3) : arrayBuffer;
+  const bomNote = hasBOM ? ' (BOM)' : '';
+
+  // 1. UTF-8 strict
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(buf);
+    if (looksLikeText(text)) return { text, encoding: 'UTF-8' + bomNote };
+  } catch(_) {}
+
+  // 2. Latin-1 / ISO-8859-1
+  const latin1 = new TextDecoder('latin1').decode(buf);
+  if (looksLikeText(latin1)) return { text: latin1, encoding: 'Latin-1' };
+
+  // 3. EBCDIC-037
+  const ebcdic = ebcdicToString(new Uint8Array(buf));
+  if (looksLikeText(ebcdic)) return { text: ebcdic, encoding: 'EBCDIC-037' };
+
+  // 4. Fallback Latin-1
+  return { text: latin1, encoding: 'unknown (Latin-1 fallback)', warning: true };
+}
+
+function ingestFile(filename, text, encoding, warning, size, pasted) {
+  const language = detectLanguage(filename, text);
+  const ext      = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+
+  let content = text;
+  let notes   = [];
+  let format  = null;
+
+  if (language === 'jcl') {
+    format = detectFormat(text) || FORMAT.JCL_PURE;
+    const norm = normalizeToJCL(text, format);
+    content = norm.jcl;
+    notes   = norm.notes || [];
+  }
+  // COBOL : pas de normalisation, le contenu brut est conservé
+
+  const knownExt = language === 'cobol' ? (COBOL_EXTENSIONS.has(ext) || ext === '')
+                 : language === 'jcl'   ? (JCL_EXTENSIONS.has(ext) || ext === '')
+                 : true;
+
+  if (language === 'unknown') {
+    notes.unshift('⚠ Language not identified — neither JCL nor COBOL detected. Le fichier sera ignoré lors de l\'analyse.');
+  } else if (!knownExt) {
+    notes.unshift(`Extension .${ext} non-standard pour ${language.toUpperCase()} — contenu détecté quand même`);
+  }
+
+  // Éviter d'écraser un fichier existant du même nom
+  let finalName = filename;
+  if (loadedFiles[finalName]) {
+    const dot = finalName.lastIndexOf('.');
+    const base = dot >= 0 ? finalName.substring(0, dot) : finalName;
+    const extPart = dot >= 0 ? finalName.substring(dot) : '';
+    let n = 2;
+    while (loadedFiles[`${base}-${n}${extPart}`]) n++;
+    finalName = `${base}-${n}${extPart}`;
+  }
+
+  loadedFiles[finalName] = {
+    content, rawText: text, encoding, language, format,
+    notes, warning: warning || language === 'unknown',
+    ext, knownExt, size, pasted: !!pasted,
+  };
+  return finalName;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MODÈLE DE DONNÉES UNIFIÉ
+//
+//  Indépendant du langage source. Tout job JCL, step JCL, programme
+//  COBOL ou paragraphe COBOL devient un SystemNode. Toute relation
+//  d'exécution (JOB→STEP), d'appel (PERFORM/CALL/GOTO/EXEC PGM=) ou
+//  de flux de données (step→dataset, dataset→step, SELECT→fichier)
+//  devient un SystemEdge.
+//
+//  SystemNode {
+//    id:        string   identifiant unique global ("jcl:DAILYBAT" / "cobol:BELFINT2")
+//    kind:      'job' | 'step' | 'program' | 'paragraph' | 'dataset' | 'file'
+//    language:  'jcl' | 'cobol'
+//    label:     string   nom affiché
+//    sourceFile:string   fichier d'origine
+//    meta:      {...}    détails spécifiques (class, pic, organisation, etc.)
+//  }
+//
+//  SystemEdge {
+//    from, to:  string   ids de SystemNode
+//    kind:      'contains'   (JOB contient STEP, PROGRAM contient PARAGRAPH)
+//             | 'executes'   (STEP exécute PROGRAM, via PGM=)
+//             | 'reads'      (STEP/PARAGRAPH lit un dataset/fichier)
+//             | 'writes'     (STEP/PARAGRAPH écrit un dataset/fichier)
+//             | 'performs'   (PARAGRAPH → PARAGRAPH via PERFORM)
+//             | 'calls'      (PARAGRAPH → PROGRAM via CALL, ou STEP → PROGRAM via PGM=)
+//             | 'goes_to'    (PARAGRAPH → PARAGRAPH via GOTO)
+//    label:     string   info contextuelle (ex: nom du DD, nom du DSN)
+//  }
+// ═══════════════════════════════════════════════════════════════
+
+function buildSystemModel() {
+  const nodes = [];  // SystemNode[]
+  const edges = [];  // SystemEdge[]
+  const nodeIndex = {}; // id → node (accès rapide)
+
+  const addNode = (node) => {
+    if (nodeIndex[node.id]) return nodeIndex[node.id]; // déjà ajouté
+    nodes.push(node);
+    nodeIndex[node.id] = node;
+    return node;
+  };
+  const addEdge = (from, to, kind, label) => {
+    if (!from || !to) return;
+    edges.push({ from, to, kind, label: label || '' });
+  };
+
+  // ── 1. Parcourir les fichiers JCL déjà analysés ───────────────
+  for (const [filename, f] of Object.entries(loadedFiles)) {
+    if (f.language !== 'jcl' || !f.parsed) continue;
+
+    for (const job of f.parsed.jobs) {
+      const jobId = `jcl:job:${job.name}:${filename}`;
+      addNode({
+        id: jobId, kind: 'job', language: 'jcl', label: job.name,
+        sourceFile: filename,
+        meta: { class: job.class, msgclass: job.msgclass, title: job.title, synthetic: !!job.synthetic },
+      });
+
+      for (const step of job.steps) {
+        const stepId = `jcl:step:${job.name}:${step.name}:${filename}`;
+        addNode({
+          id: stepId, kind: 'step', language: 'jcl', label: step.name,
+          sourceFile: filename,
+          meta: { execType: step.execType, execTarget: step.execTarget, cond: step.cond, isSystemPgm: step.isSystemPgm },
+        });
+        addEdge(jobId, stepId, 'contains', '');
+
+        // STEP exécute un PGM= : lien vers un futur nœud 'program' (résolu en passe 3)
+        if (step.execType === 'PGM' && !step.isSystemPgm) {
+          // Cible non encore connue (programme COBOL pas forcément chargé) :
+          // on note l'intention dans une edge "pending" résolue plus bas.
+          addEdge(stepId, `pending:program:${step.execTarget}`, 'calls', step.execTarget);
+        }
+
+        // DD → dataset (lecture / écriture)
+        for (const dd of step.dds) {
+          if (!dd.dsn) continue;
+          const dsId = `dataset:${dd.dsn}`;
+          addNode({ id: dsId, kind: 'dataset', language: 'jcl', label: dd.dsn, sourceFile: filename, meta: { disp: dd.disp } });
+          const isWrite = dd.disp && dd.disp.toUpperCase().includes('NEW');
+          addEdge(stepId, dsId, isWrite ? 'writes' : 'reads', dd.ddName);
+        }
+      }
+    }
+  }
+
+  // ── 2. Parcourir les fichiers COBOL déjà analysés ─────────────
+  for (const [filename, f] of Object.entries(loadedFiles)) {
+    if (f.language !== 'cobol' || !f.parsed) continue;
+    const prog = f.parsed;
+
+    const progId = `cobol:program:${prog.programName}`;
+    addNode({
+      id: progId, kind: 'program', language: 'cobol', label: prog.programName,
+      sourceFile: filename,
+      meta: { author: prog.author, divisionsFound: prog.divisionsFound, copyBooks: prog.copyBooks.map(c=>c.name) },
+    });
+
+    // Fichiers SELECT/FD du programme
+    for (const file of prog.files) {
+      const fileId = `file:${prog.programName}:${file.fileName}`;
+      addNode({
+        id: fileId, kind: 'file', language: 'cobol', label: file.fileName,
+        sourceFile: filename,
+        meta: { assignTo: file.assignTo, organization: file.organization, recordCount: file.recordCount },
+      });
+      // Le sens (lecture/écriture) n'est pas toujours explicite au niveau SELECT —
+      // on le détermine plus précisément à partir des OPEN INPUT/OUTPUT si dispo,
+      // sinon on pose une relation neutre "reads" par défaut (affiché comme lien simple).
+      addEdge(progId, fileId, 'reads', file.assignTo || '');
+    }
+
+    // Paragraphes
+    for (const para of prog.paragraphs) {
+      const paraId = `cobol:para:${prog.programName}:${para.name}`;
+      addNode({ id: paraId, kind: 'paragraph', language: 'cobol', label: para.name, sourceFile: filename, meta: {} });
+      addEdge(progId, paraId, 'contains', '');
+    }
+
+    // Appels entre paragraphes (PERFORM / CALL / GOTO)
+    for (const call of prog.calls) {
+      const fromId = `cobol:para:${prog.programName}:${call.from}`;
+      if (call.type === 'PERFORM') {
+        const toId = `cobol:para:${prog.programName}:${call.target}`;
+        addEdge(fromId, toId, 'performs', '');
+      } else if (call.type === 'GOTO') {
+        const toId = `cobol:para:${prog.programName}:${call.target}`;
+        addEdge(fromId, toId, 'goes_to', '');
+      } else if (call.type === 'CALL') {
+        // CALL 'AUTRE-PROGRAMME' : cible potentiellement un autre programme COBOL
+        addEdge(fromId, `pending:program:${call.target}`, 'calls', call.target);
+      }
+    }
+  }
+
+  // ── 3. Résoudre les liens "pending" (JCL PGM= ↔ COBOL PROGRAM-ID) ──
+  // Les steps JCL et les CALL COBOL créent des edges vers `pending:program:X`.
+  // On les reroute vers le vrai nœud `cobol:program:X` s'il existe, sinon
+  // on matérialise un nœud "externe" pour ne pas perdre l'information.
+  const resolvedEdges = [];
+  for (const edge of edges) {
+    if (typeof edge.to === 'string' && edge.to.startsWith('pending:program:')) {
+      const targetName = edge.to.substring('pending:program:'.length);
+      const realId = `cobol:program:${targetName}`;
+      if (nodeIndex[realId]) {
+        resolvedEdges.push({ ...edge, to: realId, kind: 'calls' });
+      } else {
+        // Programme non chargé dans l'analyse — nœud "externe" informatif
+        const extId = `external:program:${targetName}`;
+        addNode({ id: extId, kind: 'program', language: 'unknown', label: targetName, sourceFile: null, meta: { external: true } });
+        resolvedEdges.push({ ...edge, to: extId, kind: 'calls' });
+      }
+    } else {
+      resolvedEdges.push(edge);
+    }
+  }
+
+  return { nodes, edges: resolvedEdges, nodeIndex };
+}
+
+// ── Accès pratiques au modèle pour les vues ─────────────────────
+function getNodesByKind(model, kind) { return model.nodes.filter(n => n.kind === kind); }
+function getEdgesByKind(model, kind) { return model.edges.filter(e => e.kind === kind); }
+function getOutgoingEdges(model, nodeId) { return model.edges.filter(e => e.from === nodeId); }
+function getIncomingEdges(model, nodeId) { return model.edges.filter(e => e.to === nodeId); }
+
+// ── Chargement multi-fichiers depuis l'upload / drag&drop ──────
+function loadFilesIntoState(files) {
+  let pending = files.length;
+  for (const file of files) {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const { text, encoding, warning } = detectAndDecode(ev.target.result);
+        ingestFile(file.name, text, encoding, warning, file.size, false);
+      } catch (err) {
+        console.error(`Erreur chargement ${file.name}:`, err);
+        // Fallback : stocker le fichier tel quel en texte brut
+        const text = new TextDecoder('utf-8', { fatal: false }).decode(ev.target.result);
+        loadedFiles[file.name] = {
+          content: text, rawText: text, encoding: 'UTF-8 (fallback)',
+          language: 'unknown', notes: [`Decoding error : ${err.message}`],
+          warning: true, ext: file.name.split('.').pop().toLowerCase(),
+          knownExt: false, size: file.size, pasted: false,
+        };
+      }
+      pending--;
+      if (pending === 0) renderFileList();
+    };
+    reader.onerror = () => {
+      console.error(`Cannot read ${file.name}`);
+      pending--;
+      if (pending === 0) renderFileList();
+    };
+    reader.readAsArrayBuffer(file);
+  }
+}
+
+// ── Rendu de la liste de fichiers (panel gauche) ───────────────
+function renderFileList() {
+  const names  = Object.keys(loadedFiles);
+  const infoEl = document.getElementById('fileInfo');
+  const listEl = document.getElementById('fileListItems');
+  const pb     = document.getElementById('parseBtn');
+
+  if (!names.length) {
+    infoEl.classList.remove('show');
+    pb.classList.remove('show');
+    return;
+  }
+
+  infoEl.classList.add('show');
+  pb.classList.add('show');
+  pb.textContent = `▶ Analyze ${names.length} fichier${names.length>1?'s':''}`;
+  pb.style.cssText = '';
+  pb.disabled = false;
+
+  const LANG_LABEL = { jcl: 'JCL', cobol: 'COBOL', unknown: '?' };
+  const LANG_CLASS = { jcl: 'lang-jcl', cobol: 'lang-cobol', unknown: 'lang-unknown' };
+
+  listEl.innerHTML = names.map(n => {
+    const f = loadedFiles[n];
+    const lines = f.content.split('\n').length;
+    const ext   = f.ext ? f.ext.toUpperCase() : '?';
+    const sizeKb = f.size ? `${(f.size/1024).toFixed(1)}K` : '';
+    const langBadge = `<span class="lang-badge ${LANG_CLASS[f.language]}">${LANG_LABEL[f.language]}</span>`;
+    const pastedBadge = f.pasted ? `<span style="font-size:9px;color:var(--purple)" title="Pasted code">✎</span>` : '';
+    const warnBadge = f.warning ? `<span style="font-size:9px;color:var(--red)" title="${(f.notes||[])[0] || 'Incertain'}">⚠</span>` : '';
+    const formatBadge = (f.format && f.format !== FORMAT.JCL_PURE)
+      ? `<span style="font-family:'IBM Plex Mono',monospace;font-size:8px;color:var(--yellow);background:rgba(240,180,41,0.1);border:1px solid rgba(240,180,41,0.2);border-radius:3px;padding:1px 5px">${f.format}</span>`
+      : '';
+
+    return `<div class="file-list-item">
+      <div class="file-list-row">
+        ${langBadge}
+        <span class="file-list-name" title="${n}">${n}</span>
+        <span style="cursor:pointer;color:var(--text3);font-size:14px;line-height:1;padding:0 2px" onclick="removeFile('${n}')" title="Remove file">×</span>
+      </div>
+      <div class="file-list-meta">
+        <span>.${ext} · ${lines}L ${sizeKb}</span>
+        <span>${f.encoding || ''}</span>
+        ${warnBadge}${pastedBadge}${formatBadge}
+        ${f.notes && f.notes.length ? `<span>${f.notes.length} note${f.notes.length>1?'s':''}</span>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function removeFile(name) {
+  delete loadedFiles[name];
+  resetUI();
+  renderFileList();
+}
+
+// ── Drag & drop / input file ────────────────────────────────────
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  if (e.target.files.length) {
+    loadFilesIntoState([...e.target.files]);
+    // Reset input pour permettre de re-sélectionner le même fichier
+    e.target.value = '';
+  }
+});
+
+const dz = document.getElementById('dropZone');
+dz.addEventListener('dragover', e => { e.preventFromfault(); dz.classList.add('drag-over'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+dz.addEventListener('drop', e => {
+  e.preventFromfault();
+  dz.classList.remove('drag-over');
+  if (e.dataTransfer.files.length) loadFilesIntoState([...e.dataTransfer.files]);
+});
+
+// ── Coller du code directement ──────────────────────────────────
+const pasteToggleBtn = document.getElementById('pasteToggleBtn');
+const pastePanel      = document.getElementById('pastePanel');
+const pasteTextarea   = document.getElementById('pasteTextarea');
+const pasteFilenameEl = document.getElementById('pasteFilename');
+const pasteAddBtn     = document.getElementById('pasteAddBtn');
+
+pasteToggleBtn.addEventListener('click', () => {
+  const isOpen = pastePanel.style.display !== 'none';
+  pastePanel.style.display = isOpen ? 'none' : 'block';
+  pasteToggleBtn.classList.toggle('active', !isOpen);
+  if (!isOpen) pasteTextarea.focus();
+});
+
+function generatePasteFilename(text) {
+  // Fromvine une extension plausible à partir d'une détection rapide du contenu
+  const lang = detectLanguage('pasted', text);
+  const ext = lang === 'cobol' ? 'cbl' : lang === 'jcl' ? 'jcl' : 'txt';
+  let n = 1;
+  let name = `collé-${n}.${ext}`;
+  while (loadedFiles[name]) { n++; name = `collé-${n}.${ext}`; }
+  return name;
+}
+
+function addPastedCode() {
+  const code = pasteTextarea.value;
+  if (!code.trim()) { pasteTextarea.focus(); return; }
+
+  let filename = pasteFilenameEl.value.trim() || generatePasteFilename(code);
+  if (!filename.includes('.')) {
+    const lang = detectLanguage(filename, code);
+    filename += lang === 'cobol' ? '.cbl' : lang === 'jcl' ? '.jcl' : '.txt';
+  }
+
+  const bytes = new TextEncoder().encode(code);
+  resetUI();
+  const { text, encoding, warning } = detectAndDecode(bytes.buffer);
+  ingestFile(filename, text, encoding, warning, bytes.byteLength, true);
+  renderFileList();
+
+  pasteTextarea.value = '';
+  pasteFilenameEl.value = '';
+  pastePanel.style.display = 'none';
+  pasteToggleBtn.classList.remove('active');
+}
+
+pasteAddBtn.addEventListener('click', addPastedCode);
+pasteTextarea.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventFromfault(); addPastedCode(); }
+});
+
+// ── Réinitialisation de l'UI entre deux analyses ───────────────
+function resetUI() {
+  document.getElementById('emptyMap').style.display = 'flex';
+  document.getElementById('mapContainer').style.display = 'none';
+  document.getElementById('mapContainer').innerHTML = '';
+
+  document.getElementById('emptyPrograms').style.display = 'flex';
+  document.getElementById('programsContainer').style.display = 'none';
+  document.getElementById('programsContainer').innerHTML = '';
+
+  document.getElementById('emptyData').style.display = 'flex';
+  document.getElementById('dataContainer').style.display = 'none';
+  document.getElementById('dataContainer').innerHTML = '';
+
+  document.getElementById('emptyFlow').style.display = 'flex';
+  document.getElementById('flowContainer').style.display = 'none';
+  document.getElementById('flowContainer').innerHTML = '';
+
+  document.getElementById('emptySource').style.display = 'flex';
+  document.getElementById('sourceContainer').style.display = 'none';
+  document.getElementById('sourceHlCode').innerHTML = '';
+  document.getElementById('srcEncBadge').textContent = '';
+
+  document.getElementById('emptySummary').style.display = 'flex';
+  document.getElementById('summaryContainer').style.display = 'none';
+  document.getElementById('summaryContainer').innerHTML = '';
+
+  document.getElementById('emptyTranslate').style.display = 'flex';
+  document.getElementById('translateContainer').style.display = 'none';
+  const tStatus = document.getElementById('translateStatus');
+  const tOutput = document.getElementById('translateOutput');
+  if (tStatus) tStatus.style.display = 'none';
+  if (tOutput) tOutput.style.display = 'none';
+
+  document.getElementById('emptyFrombug').style.display = 'flex';
+  document.getElementById('debugContainer').style.display = 'none';
+  document.getElementById('debugLog').innerHTML = '';
+
+  document.getElementById('statsGrid').style.display = 'none';
+  document.getElementById('statsGrid').innerHTML = '';
+}
+
+function renderStatsGrid(entries) {
+  const grid = document.getElementById('statsGrid');
+  grid.innerHTML = entries.map(([id, value, label]) => `
+    <div class="stat-card">
+      <div class="stat-value" id="${id}">${value}</div>
+      <div class="stat-label">${label}</div>
+    </div>`).join('');
+  grid.style.display = 'grid';
+}
+
+// ── Tabs ─────────────────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  RENDU — CARTE DU SYSTÈME (tab-map)
+//  Layout Sugiyama simplifié en colonnes par "rang" :
+//  rang 0 = jobs JCL
+//  rang 1 = steps JCL
+//  rang 2 = programmes COBOL (et programmes externes)
+//  rang 3 = paragraphes COBOL
+//  rang 4 = datasets / fichiers
+//  Arêtes colorées par kind, tooltip au survol.
+// ═══════════════════════════════════════════════════════════════
+
+function renderSystemMap(model) {
+  const emptyEl = document.getElementById('emptyMap');
+  const cont    = document.getElementById('mapContainer');
+  cont.innerHTML = '';
+  if (!model.nodes.length) { emptyEl.style.display='flex'; cont.style.display='none'; return; }
+  emptyEl.style.display = 'none'; cont.style.display = 'block';
+
+  const ECOL = { contains:'#2e3248',calls:'#a78bfa',performs:'#3dd68c',goes_to:'#f06560',reads:'#38bdf8',writes:'#f0b429' };
+  const KRANK = { job:0,step:1,program:2,paragraph:3,dataset:4,file:4 };
+  const KCOL  = { job:'#4e9bff',step:'#f0b429',program:'#a78bfa',paragraph:'#3dd68c',dataset:'#e06c75',file:'#38bdf8' };
+  const RLBL  = { 0:'JOBS',1:'STEPS',2:'PROGRAMS',3:'PARAGRAPHS',4:'DATA' };
+
+  const byRank={0:[],1:[],2:[],3:[],4:[]};
+  for (const n of model.nodes) byRank[KRANK[n.kind]??2].push(n);
+  for (const r in byRank) byRank[r].sort((a,b)=>(a.label||'').localeCompare(b.label||''));
+  const active=[0,1,2,3,4].filter(r=>byRank[r].length>0);
+  if (!active.length) { emptyEl.style.display='flex'; cont.style.display='none'; return; }
+
+  const W=160,H=40,CGAP=90,RGAP=14,PX=28,PY=48;
+  const maxR=Math.max(...active.map(r=>byRank[r].length),1);
+  const SVG_W=PX*2+active.length*(W+CGAP);
+  const SVG_H=PY*2+maxR*(H+RGAP);
+
+  const pos={};
+  active.forEach((r,ci)=>{
+    const col=byRank[r], ch=Math.max(col.length*(H+RGAP)-RGAP,0);
+    const sy=PY+Math.max((SVG_H-PY*2-ch)/2,0);
+    col.forEach((n,i)=>{ pos[n.id]={x:PX+ci*(W+CGAP),y:sy+i*(H+RGAP),cx:PX+ci*(W+CGAP)+W/2,cy:sy+i*(H+RGAP)+H/2}; });
+  });
+
+  const ns='http://www.w3.org/2000/svg';
+  const mk=(tag,attrs,txt)=>{
+    const el=document.createElementNS(ns,tag);
+    for(const[k,v]of Object.entries(attrs))el.setAttribute(k,String(v??''));
+    if(txt!==undefined)el.textContent=txt; return el;
+  };
+  const esc=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  // SVG + groupe transformable pour zoom/pan
+  const svg=document.createElementNS(ns,'svg');
+  svg.setAttribute('width','100%');
+  svg.setAttribute('height',Math.min(SVG_H,600));
+  svg.style.cssText='display:block;cursor:grab;user-select:none';
+  const gMain=mk('g',{});  // TOUT va dans gMain
+
+  const wrap=document.createElement('div');
+  wrap.style.cssText='position:relative;background:#0d0f14;border:1px solid var(--border);border-radius:8px;overflow:hidden';
+  const tip=document.createElement('div');
+  tip.style.cssText='display:none;position:absolute;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:8px 12px;font-family:IBM Plex Mono,monospace;font-size:11px;color:var(--text);pointer-events:none;z-index:10;max-width:260px;line-height:1.8';
+
+  // Contrôles zoom
+  const zbar=document.createElement('div');
+  zbar.style.cssText='position:absolute;top:10px;right:10px;z-index:20;display:flex;flex-direction:column;gap:4px';
+  let vx=0,vy=0,vscale=1;
+  const applyT=()=>gMain.setAttribute('transform',`translate(${vx},${vy}) scale(${vscale})`);
+  const zoomTo=(delta,cx,cy)=>{
+    const r=wrap.getBoundingClientRect();
+    const mx=cx??r.width/2, my=cy??r.height/2;
+    const ns2=Math.min(4,Math.max(0.15,vscale*delta));
+    vx=mx-(mx-vx)*(ns2/vscale); vy=my-(my-vy)*(ns2/vscale); vscale=ns2; applyT();
+  };
+  const mkBtn=(lbl,title,fn)=>{
+    const b=document.createElement('button');
+    b.textContent=lbl; b.title=title;
+    b.style.cssText='width:28px;height:28px;background:var(--bg3);border:1px solid var(--border2);border-radius:4px;color:var(--text2);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center';
+    b.onmouseover=()=>{b.style.background='var(--border2)';b.style.color='var(--text)'};
+    b.onmouseout=()=>{b.style.background='var(--bg3)';b.style.color='var(--text2)'};
+    b.onclick=fn; return b;
+  };
+  zbar.appendChild(mkBtn('+','Zoom in',()=>zoomTo(1.25)));
+  zbar.appendChild(mkBtn('−','Zoom out',()=>zoomTo(0.8)));
+  zbar.appendChild(mkBtn('⊡','Fit view',()=>{
+    const r=wrap.getBoundingClientRect();
+    vscale=Math.min(r.width/SVG_W,r.height/SVG_H,1)*0.92;
+    vx=(r.width-SVG_W*vscale)/2; vy=(r.height-SVG_H*vscale)/2; applyT();
+  }));
+  zbar.appendChild(mkBtn('↺','Reset',()=>{vx=0;vy=0;vscale=1;applyT();}));
+
+  // Pan drag
+  let drag=false,dx=0,dy=0,vx0=0,vy0=0;
+  svg.addEventListener('mousedown',e=>{if(e.button!==0)return;drag=true;dx=e.clientX;dy=e.clientY;vx0=vx;vy0=vy;svg.style.cursor='grabbing';e.preventFromfault()});
+  window.addEventListener('mousemove',e=>{if(!drag)return;vx=vx0+(e.clientX-dx);vy=vy0+(e.clientY-dy);applyT()});
+  window.addEventListener('mouseup',()=>{drag=false;svg.style.cursor='grab'});
+  svg.addEventListener('wheel',e=>{e.preventFromfault();const r=wrap.getBoundingClientRect();zoomTo(e.deltaY<0?1.15:0.87,e.clientX-r.left,e.clientY-r.top)},{passive:false});
+
+  wrap.appendChild(svg); wrap.appendChild(tip); wrap.appendChild(zbar);
+  cont.appendChild(wrap);
+
+  // Fromfs marqueurs
+  const defs=mk('defs',{});
+  Object.entries(ECOL).forEach(([k,c])=>{
+    const m2=mk('marker',{id:`a-${k}`,markerWidth:'8',markerHeight:'6',refX:'7',refY:'3',orient:'auto'});
+    m2.appendChild(mk('polygon',{points:'0 0, 8 3, 0 6',fill:c})); defs.appendChild(m2);
+  });
+  svg.appendChild(defs);
+  svg.appendChild(mk('rect',{width:SVG_W,height:SVG_H,fill:'#0d0f14'}));
+  svg.appendChild(gMain);  // gMain dans svg APRÈS le fond
+
+  // Labels colonnes dans gMain
+  active.forEach((r,ci)=>{
+    gMain.appendChild(mk('text',{x:PX+ci*(W+CGAP)+W/2,y:18,'text-anchor':'middle','font-family':'IBM Plex Mono,monospace','font-size':'8',fill:'#454a66','letter-spacing':'0.1em'},RLBL[r]||''));
+  });
+
+  // Arêtes dans gMain
+  const eg=mk('g',{});
+  for(const e of model.edges){
+    if(e.kind==='contains')continue;
+    const sp=pos[e.from],tp=pos[e.to]; if(!sp||!tp)continue;
+    const c=ECOL[e.kind]||'#4e9bff';
+    const[x1,y1,x2,y2]=[sp.x+W,sp.cy,tp.x,tp.cy],cpx=(x1+x2)/2;
+    const d=`M ${x1} ${y1} C ${cpx} ${y1}, ${cpx} ${y2}, ${x2} ${y2}`;
+    const p=mk('path',{d,stroke:c,'stroke-width':'1.4',fill:'none',opacity:'0.5','marker-end':`url(#a-${e.kind})`});
+    const hv=mk('path',{d,stroke:'transparent','stroke-width':'12',fill:'none',cursor:'pointer'});
+    const fl=esc(model.nodeIndex[e.from]?.label||''),tl=esc(model.nodeIndex[e.to]?.label||'');
+    hv.addEventListener('mouseenter',()=>{p.setAttribute('opacity','1');p.setAttribute('stroke-width','2.5');
+      tip.innerHTML=`<b style="color:${c}">${e.kind.toUpperCase()}</b><br>${fl} → ${tl}${e.label?`<br><span style="color:var(--text3);font-size:10px">${esc(e.label)}</span>`:''}`;tip.style.display='block'});
+    hv.addEventListener('mousemove',ev=>{const r=wrap.getBoundingClientRect();tip.style.left=Math.min(ev.clientX-r.left+14,r.width-270)+'px';tip.style.top=(ev.clientY-r.top+14)+'px'});
+    hv.addEventListener('mouseleave',()=>{p.setAttribute('opacity','0.5');p.setAttribute('stroke-width','1.4');tip.style.display='none'});
+    eg.appendChild(p);eg.appendChild(hv);
+  }
+  gMain.appendChild(eg);  // arêtes dans gMain ✓
+
+  // Nœuds dans gMain
+  for(const node of model.nodes){
+    const p=pos[node.id]; if(!p)continue;
+    const c=KCOL[node.kind]||'#7a80a0',ext=!!node.meta?.external,g=mk('g',{cursor:'pointer'});
+    const rect=mk('rect',{x:p.x,y:p.y,width:W,height:H,rx:'5',fill:ext?'#13161e':'#1a1d28',stroke:ext?'#3a3a52':c,'stroke-width':ext?'1':'1.3','stroke-dasharray':ext?'4,3':'none'});
+    g.appendChild(rect);
+    if(!ext)g.appendChild(mk('rect',{x:p.x,y:p.y+4,width:'3',height:H-8,rx:'1.5',fill:c}));
+    const lc=node.language==='jcl'?'#4e9bff':node.language==='cobol'?'#a78bfa':'#454a66';
+    g.appendChild(mk('text',{x:p.x+W-6,y:p.y+11,'text-anchor':'end','font-family':'IBM Plex Mono,monospace','font-size':'7',fill:lc,opacity:'0.7'},node.language==='jcl'?'JCL':node.language==='cobol'?'CBL':'?'));
+    const lbl=(node.label||'').length>18?(node.label||'').slice(0,17)+'…':(node.label||'');
+    g.appendChild(mk('text',{x:p.x+11,y:p.cy+4,'font-family':'IBM Plex Mono,monospace','font-size':'10.5',fill:ext?'#454a66':c,'font-weight':ext?'400':'500'},lbl));
+    g.addEventListener('mouseenter',()=>{rect.setAttribute('fill','#252836');
+      tip.innerHTML=`<b style="color:${c}">${node.kind.toUpperCase()}</b>${ext?' <span style="color:#454a66;font-size:9px">(EXT.)</span>':''}<br><span style="color:var(--text)">${esc(node.label||'')}</span><br><span style="color:var(--text3);font-size:10px">${esc(node.sourceFile||'—')}</span>`;tip.style.display='block'});
+    g.addEventListener('mousemove',ev=>{const r=wrap.getBoundingClientRect();tip.style.left=Math.min(ev.clientX-r.left+14,r.width-270)+'px';tip.style.top=(ev.clientY-r.top+14)+'px'});
+    g.addEventListener('mouseleave',()=>{rect.setAttribute('fill',ext?'#13161e':'#1a1d28');tip.style.display='none'});
+    gMain.appendChild(g);  // nœuds dans gMain ✓
+  }
+
+  // Légende
+  const leg=document.createElement('div');
+  leg.style.cssText='display:flex;flex-wrap:wrap;gap:12px;margin-top:12px;font-family:IBM Plex Mono,monospace;font-size:10px;color:var(--text3)';
+  leg.innerHTML=[['#a78bfa','call'],['#3dd68c','perform'],['#f06560','goto'],['#38bdf8','read'],['#f0b429','write'],
+    ['#4e9bff','job'],['#f0b429','step'],['#a78bfa','program'],['#3dd68c','paragraph'],['#e06c75','dataset']
+  ].map(([c,l])=>`<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:14px;height:3px;background:${c};border-radius:2px"></span>${l}</span>`).join('');
+  cont.appendChild(leg);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  RENDU — PROGRAMMES (tab-programs)
+//  Liste unifiée de tous les nœuds job/step/program/paragraph.
+// ═══════════════════════════════════════════════════════════════
+function renderPrograms(model) {
+  const emptyEl = document.getElementById('emptyPrograms');
+  const cont    = document.getElementById('programsContainer');
+  if (!model.nodes.length) return;
+  emptyEl.style.display = 'none';
+  cont.style.display = 'block';
+
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const KIND_COLOR = { job:'var(--accent)', step:'var(--yellow)', program:'var(--purple)', paragraph:'var(--green)', dataset:'var(--red)', file:'var(--cyan)' };
+  const LANG_CLASS = { jcl:'lang-jcl', cobol:'lang-cobol', unknown:'lang-unknown' };
+  const LANG_LABEL = { jcl:'JCL', cobol:'COBOL', unknown:'?' };
+
+  // Regrouper par fichier source
+  const byFile = {};
+  for (const node of model.nodes) {
+    if (node.kind === 'dataset' || node.kind === 'file') continue; // dans l'onglet Données
+    const src = node.sourceFile || '(inconnu)';
+    if (!byFile[src]) byFile[src] = [];
+    byFile[src].push(node);
+  }
+
+  for (const [src, nodes] of Object.entries(byFile)) {
+    const lang = loadedFiles[src]?.language || 'unknown';
+    const card = document.createElement('div');
+    card.className = 'job-card';
+
+    // Trier : jobs/programs d'abord, puis steps/paragraphes
+    const kindOrder = { job:0, program:1, step:2, paragraph:3 };
+    nodes.sort((a,b) => (kindOrder[a.kind]??9) - (kindOrder[b.kind]??9) || a.label.localeCompare(b.label));
+
+    const rows = nodes.map((n, i) => {
+      const col = KIND_COLOR[n.kind] || 'var(--text2)';
+      const outgoing = getOutgoingEdges(model, n.id).filter(e => e.kind !== 'contains');
+      const incoming = getIncomingEdges(model, n.id).filter(e => e.kind !== 'contains');
+      const callsOut = outgoing.filter(e => ['calls','performs','goes_to'].includes(e.kind));
+      const isExternal = n.meta?.external;
+
+      return `<tr>
+        <td><span class="step-num">${i+1}</span></td>
+        <td><span style="font-family:'IBM Plex Mono',monospace;font-size:9px;padding:1px 5px;background:${col}1a;color:${col};border:1px solid ${col}40;border-radius:3px">${esc(n.kind.toUpperCase())}</span></td>
+        <td class="cell-mono" style="color:${col}">${esc(n.label)}${isExternal ? ' <span style="font-size:9px;color:var(--text3)">(ext.)</span>' : ''}</td>
+        <td style="font-size:10px;color:var(--text3)">${outgoing.length} out · ${incoming.length} in</td>
+        <td style="font-size:10px;color:var(--text3)">${callsOut.map(e => esc(model.nodeIndex[e.to]?.label||e.to)).slice(0,3).join(', ')}</td>
+      </tr>`;
+    }).join('');
+
+    card.innerHTML = `
+      <div class="job-header">
+        <span class="lang-badge ${LANG_CLASS[lang]}">${LANG_LABEL[lang]}</span>
+        <span class="job-name">${esc(src)}</span>
+        <span class="job-class">${nodes.length} nœud${nodes.length>1?'s':''}</span>
+        <span class="job-chevron">▾</span>
+      </div>
+      <div class="job-body">
+        <table class="steps-table">
+          <thead><tr><th>#</th><th>Type</th><th>Nom</th><th>Liens</th><th>Appels →</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+    card.querySelector('.job-header').addEventListener('click', () => card.classList.toggle('collapsed'));
+    cont.appendChild(card);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  RENDU — DONNÉES (tab-data)
+//  Datasets JCL + fichiers SELECT COBOL, fusionnés, dédoublonnés.
+// ═══════════════════════════════════════════════════════════════
+function renderDataTab(model) {
+  const emptyEl = document.getElementById('emptyData');
+  const cont    = document.getElementById('dataContainer');
+  const dataNodes = model.nodes.filter(n => n.kind === 'dataset' || n.kind === 'file');
+  if (!dataNodes.length) { emptyEl.style.display = 'flex'; cont.style.display = 'none'; return; }
+  emptyEl.style.display = 'none';
+  cont.style.display = 'block';
+
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  const grid = document.createElement('div');
+  grid.className = 'datasets-grid';
+
+  for (const n of dataNodes) {
+    const incoming = getIncomingEdges(model, n.id);
+    const outgoing = getOutgoingEdges(model, n.id);
+    const writers = incoming.filter(e => e.kind === 'writes').map(e => model.nodeIndex[e.from]?.label || e.from);
+    const readers = outgoing.filter(e => e.kind === 'reads').map(e => model.nodeIndex[e.to]?.label || e.to)
+      .concat(incoming.filter(e => e.kind === 'reads').map(e => model.nodeIndex[e.from]?.label || e.from));
+
+    const isOutput = writers.length > 0;
+    const col = n.kind === 'file' ? 'var(--cyan)' : isOutput ? 'var(--yellow)' : 'var(--green)';
+    const tagLabel = n.kind === 'file' ? 'FICHIER' : isOutput ? 'OUTPUT' : 'INPUT';
+    const tagClass = n.kind === 'file' ? 'dsn-vsam' : isOutput ? 'dsn-output' : 'dsn-input';
+
+    const meta = n.meta || {};
+    const detail = meta.organization ? `<span style="font-size:9px;color:var(--text3)">${esc(meta.organization)}</span>` : '';
+    const assignTo = meta.assignTo ? `<span style="font-size:9px;color:var(--text3)">→ ${esc(meta.assignTo)}</span>` : '';
+    const dispText = meta.disp ? `<span class="dsn-disp">${esc(meta.disp)}</span>` : '';
+
+    const card = document.createElement('div');
+    card.className = 'dataset-card';
+    card.innerHTML = `
+      <div class="dataset-name" style="color:${col}">${esc(n.label)}</div>
+      <div class="dataset-meta">
+        <span class="dataset-tag ${tagClass}">${tagLabel}</span>
+        ${dispText}${detail}${assignTo}
+      </div>
+      <div style="font-size:9px;color:var(--text3);margin-top:6px;line-height:1.8">
+        ${writers.length ? `<div>↑ écrit par : <span style="color:var(--yellow)">${writers.slice(0,3).map(esc).join(', ')}</span></div>` : ''}
+        ${readers.length ? `<div>↓ lu par : <span style="color:var(--green)">${readers.slice(0,3).map(esc).join(', ')}</span></div>` : ''}
+      </div>`;
+    grid.appendChild(card);
+  }
+  cont.appendChild(grid);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  RENDU — SOURCE (tab-source) avec sélecteur de fichier
+// ═══════════════════════════════════════════════════════════════
+function renderSourceTab() {
+  const emptyEl = document.getElementById('emptySource');
+  const cont    = document.getElementById('sourceContainer');
+  const sel     = document.getElementById('sourceFileSelect');
+  const codeEl  = document.getElementById('sourceHlCode');
+  const badge   = document.getElementById('srcEncBadge');
+
+  const names = Object.keys(loadedFiles).filter(n => loadedFiles[n].language !== 'unknown');
+  if (!names.length) return;
+
+  emptyEl.style.display = 'none';
+  cont.style.display = 'block';
+
+  sel.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join('');
+
+  const showFile = (name) => {
+    const f = loadedFiles[name];
+    if (!f) return;
+    badge.textContent = f.encoding || '';
+    const text = f.rawText || f.content;
+    const rawLines = text.split('\n');
+    if (rawLines[rawLines.length-1] === '') rawLines.pop();
+    codeEl.innerHTML = rawLines.map((line, idx) => {
+      const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      let body;
+      if (f.language === 'jcl') {
+        body = typeof tokenizeLine === 'function' ? tokenizeLine(line) : esc(line);
+      } else if (f.language === 'cobol') {
+        const isComment = line.length >= 7 && (line[6] === '*' || line[6] === '/');
+        body = isComment
+          ? `<span class="t-comment">${esc(line)}</span>`
+          : esc(line).replace(/\b(IDENTIFICATION|ENVIRONMENT|DATA|PROCEDURE|DIVISION|PROGRAM-ID|AUTHOR|FILE-CONTROL|SELECT|ASSIGN|ORGANIZATION|FD|SD|WORKING-STORAGE|LINKAGE|SECTION|PIC|PICTURE|VALUE|OCCURS|COPY|PERFORM|CALL|GO\s+TO|IF|ELSE|END-IF|MOVE|DISPLAY|OPEN|CLOSE|READ|WRITE|REWRITE|DELETE|STOP\s+RUN|EXIT|THRU)\b/gi,
+              m => `<span class="t-kw-job">${m}</span>`)
+              .replace(/PIC\s+([\w()\.+\-,S$Z9XAV]+)/gi, (_, p) => `PIC <span class="t-dsn">${p}</span>`)
+              .replace(/'([^']*)'/g, (_, p) => `<span class="t-str">'${p}'</span>`);
+      } else {
+        body = esc(line);
+      }
+      return `<div class="src-line"><span class="src-linenum">${idx+1}</span><span class="src-body">${body}</span></div>`;
+    }).join('');
+  };
+
+  sel.addEventListener('change', () => showFile(sel.value));
+  showFile(names[0]);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  RENDU — RÉSUMÉ (tab-summary)
+// ═══════════════════════════════════════════════════════════════
+function renderSummaryTab(model, counts) {
+  const emptyEl = document.getElementById('emptySummary');
+  const cont    = document.getElementById('summaryContainer');
+  if (!model.nodes.length) return;
+  emptyEl.style.display = 'none';
+  cont.style.display = 'block';
+
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const nodesByKind = (k) => model.nodes.filter(n => n.kind === k);
+  const jobs     = nodesByKind('job');
+  const steps    = nodesByKind('step');
+  const programs = nodesByKind('program');
+  const paragraphs = nodesByKind('paragraph');
+  const datasets = nodesByKind('dataset');
+  const files    = nodesByKind('file');
+  const externals = model.nodes.filter(n => n.meta?.external);
+  const edgesBy  = (k) => model.edges.filter(e => e.kind === k);
+
+  // Fichiers chargés
+  const fileNames = Object.keys(loadedFiles);
+  const FILE_COLORS = ['#4e9bff','#3dd68c','#f0b429','#a78bfa','#38bdf8','#f06560'];
+
+  cont.innerHTML = `
+    <div class="section-title">Overview</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px">
+      ${[
+        ['JCL Jobs', jobs.length, 'var(--accent)'],
+        ['JCL Steps', steps.length, 'var(--yellow)'],
+        ['Programmes', programs.length - externals.length, 'var(--purple)'],
+        ['Paragraphes', paragraphs.length, 'var(--green)'],
+        ['Datasets / Files', datasets.length + files.length, 'var(--red)'],
+        ['External Programs', externals.length, 'var(--text3)'],
+      ].map(([l,v,c]) => `<div class="stat-card"><div class="stat-value" style="color:${c}">${v}</div><div class="stat-label">${l}</div></div>`).join('')}
+    </div>
+
+    <div class="section-title">Fromtected Relations</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px">
+      ${[
+        ['JCL→COBOL (calls)', edgesBy('calls').length, 'var(--purple)'],
+        ['PERFORM', edgesBy('performs').length, 'var(--green)'],
+        ['GOTO', edgesBy('goes_to').length, 'var(--red)'],
+        ['Reads', edgesBy('reads').length, 'var(--cyan)'],
+        ['Writes', edgesBy('writes').length, 'var(--yellow)'],
+        ['Contains', edgesBy('contains').length, 'var(--text3)'],
+      ].map(([l,v,c]) => `<div class="stat-card"><div class="stat-value" style="color:${c}">${v}</div><div class="stat-label">${l}</div></div>`).join('')}
+    </div>
+
+    ${externals.length ? `
+    <div class="section-title" style="color:var(--yellow)">⚠ Programs referenced but not loaded</div>
+    <div style="background:rgba(240,180,41,0.06);border:1px solid rgba(240,180,41,0.2);border-radius:6px;padding:12px;margin-bottom:20px">
+      <div style="font-size:11px;color:var(--text3);font-family:'IBM Plex Mono',monospace;margin-bottom:8px">These programs are called (via PGM= or CALL) but missing from the analysis. Add them to complete the system map.</div>
+      ${externals.map(n => `<div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--yellow);margin-bottom:3px">▸ ${esc(n.label)}</div>`).join('')}
+    </div>` : ''}
+
+    <div class="section-title">Analyzed files</div>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:20px">
+      ${fileNames.map((name, i) => {
+        const f = loadedFiles[name];
+        const col = FILE_COLORS[i % FILE_COLORS.length];
+        const langLabel = f.language === 'jcl' ? 'JCL' : f.language === 'cobol' ? 'COBOL' : '?';
+        const langClass = f.language === 'jcl' ? 'lang-jcl' : f.language === 'cobol' ? 'lang-cobol' : 'lang-unknown';
+        const linesCount = f.content.split('\n').length;
+        const notes = f.notes || [];
+        return `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px 12px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:${notes.length?'5':'0'}px">
+            <span style="display:inline-block;width:3px;height:16px;border-radius:2px;background:${col};flex-shrink:0"></span>
+            <span class="lang-badge ${langClass}">${langLabel}</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:${col};flex:1">${esc(name)}</span>
+            <span style="font-size:9px;color:var(--text3)">${linesCount}L · ${f.encoding||''}</span>
+          </div>
+          ${notes.map(note => `<div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--text3);padding-left:11px;margin-top:2px">▸ ${esc(note)}</div>`).join('')}
+        </div>`;
+      }).join('')}
+    </div>`;
+}
+
+// ── (tab-flow placeholder — sera construit après la carte) ──────
+function renderFlowTab(model) {
+  // Pour l'instant : on réutilise le graphe inter-jobs de l'ancienne version
+  // adapté au modèle unifié. À compléter à la prochaine étape.
+  const emptyEl = document.getElementById('emptyFlow');
+  const cont    = document.getElementById('flowContainer');
+  // Calcul rapide des liens inter-jobs (JCL) et inter-programmes (COBOL)
+  const callEdges = model.edges.filter(e => e.kind === 'calls');
+  if (!callEdges.length) { emptyEl.style.display = 'flex'; return; }
+  emptyEl.style.display = 'none';
+  cont.style.display = 'block';
+
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const rows = callEdges.map(e => {
+    const fromN = model.nodeIndex[e.from];
+    const toN   = model.nodeIndex[e.to];
+    return `<tr>
+      <td class="cell-mono step-name">${esc(fromN?.label||e.from)}</td>
+      <td style="font-size:10px;color:var(--text3)">${esc(fromN?.kind||'?')}</td>
+      <td style="color:var(--purple);font-family:'IBM Plex Mono',monospace;font-size:11px">→ CALL</td>
+      <td class="cell-mono pgm-name">${esc(toN?.label||e.to)}</td>
+      <td style="font-size:9px;color:var(--text3)">${toN?.meta?.external ? '⚠ external' : toN?.kind||'?'}</td>
+    </tr>`;
+  }).join('');
+
+  cont.innerHTML = `
+    <div class="section-title" style="margin-bottom:12px">Inter-component calls detected</div>
+    <table class="steps-table">
+      <thead><tr><th>From</th><th>Type</th><th></th><th>To</th><th>Status</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+
+//    construit le modèle unifié, déclenche le rendu des onglets ──
+// ═══════════════════════════════════════════════════════════════
+//  TRADUCTION COBOL → PYTHON via API Anthropic
+// ═══════════════════════════════════════════════════════════════
+
+function renderTranslateTab() {
+  const emptyEl = document.getElementById('emptyTranslate');
+  const cont    = document.getElementById('translateContainer');
+  const sel     = document.getElementById('translateFileSelect');
+
+  // Lister uniquement les fichiers COBOL analysés
+  const cobolFiles = Object.keys(loadedFiles).filter(n => loadedFiles[n].language === 'cobol');
+  if (!cobolFiles.length) { emptyEl.style.display = 'flex'; cont.style.display = 'none'; return; }
+
+  emptyEl.style.display = 'none';
+  cont.style.display = 'block';
+  sel.innerHTML = cobolFiles.map(n => `<option value="${n}">${n}</option>`).join('');
+}
+
+async function translateCobolToPython(filename) {
+  const f = loadedFiles[filename];
+  if (!f || f.language !== 'cobol') return;
+
+  const btn      = document.getElementById('translateBtn');
+  const statusEl = document.getElementById('translateStatus');
+  const outputEl = document.getElementById('translateOutput');
+  const codeEl   = document.getElementById('pythonCode');
+  if (!btn || !statusEl || !outputEl || !codeEl) return;
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Translating…';
+  statusEl.style.display = 'block';
+  statusEl.innerHTML = '<span style="color:var(--text3)">⏳ Analyzing COBOL program…</span>';
+  outputEl.style.display = 'none';
+
+  const parsed = f.parsed || {};
+  const ctx = parsed.programName ? [
+    'PROGRAM-ID: ' + parsed.programName,
+    'Files: ' + ((parsed.files||[]).map(x=>x.fileName+'→'+(x.assignTo||'?')).join(', ')||'none'),
+    'Working-Storage: ' + ((parsed.wsItems||[]).slice(0,20).map(w=>w.level+' '+w.name+(w.pic?' PIC '+w.pic:'')).join(', ')||'none'),
+    'Paragraphs: ' + ((parsed.paragraphs||[]).map(p=>p.name).join(', ')||'none'),
+    'Calls: ' + ((parsed.calls||[]).slice(0,15).map(c=>c.from+'['+c.type+']'+c.target).join(', ')||'none'),
+    'COPY: ' + ((parsed.copyBooks||[]).map(c=>c.name).join(', ')||'none'),
+  ].join('\n') : '';
+
+  const systemPrompt = 'You are an expert in migrating COBOL to Python 3.\n'
+    + 'STRICT RULES:\n'
+    + '- Reply ONLY with pure Python code, no markdown, no explanation\n'
+    + '- Each COBOL paragraph → Python function with comment # (e.g. # 0000-MAIN)\n'
+    + '- Levels 01/05 → dataclasses with type hints\n'
+    + '- Missing COPY books → TODO class\n'
+    + '- End with if __name__ == "__main__":\n';
+
+  const src = (f.rawText || f.content || '').slice(0, 8000);
+  const userPrompt = (ctx ? 'CONTEXT:\n' + ctx + '\n\n' : '') + 'COBOL SOURCE:\n' + src;
+
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+      }),
+    });
+
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      throw new Error('API ' + resp.status + ': ' + (e.error?.message || resp.statusText));
+    }
+
+    const data = await resp.json();
+    const raw  = (data.content || []).map(b => b.text || '').join('').trim();
+    const python = raw.replace(/^```python\s*/i,'').replace(/^```\s*/,'').replace(/\s*```$/,'').trim();
+
+    // Coloration syntaxique ligne par ligne (sécurisée)
+    const KEYWORDS = /\b(def|class|import|from|return|if|elif|else|for|while|in|not|and|or|True|False|None|try|except|finally|with|as|pass|break|continue|raise|lambda|yield|async|await|self)\b/g;
+    const TYPES    = /\b(str|int|float|bool|list|dict|tuple|set|Optional|List|Dict|Any|Union|dataclass|field)\b/g;
+
+    const highlighted = python.split('\n').map(line => {
+      const e = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      if (e.trimStart().startsWith('#')) return '<span style="color:#4a5168;font-style:italic">'+e+'</span>';
+      return e
+        .replace(KEYWORDS, '<span style="color:#a78bfa;font-weight:600">$1</span>')
+        .replace(TYPES,    '<span style="color:#38bdf8">$1</span>');
+    }).join('\n');
+
+    codeEl.innerHTML = highlighted;
+    outputEl.style.display = 'block';
+    statusEl.innerHTML = '<span style="color:var(--green)">✓ ' + python.split('\n').length + ' lines of Python generated</span>';
+
+    // Copier
+    const copyBtn = document.getElementById('copyPythonBtn');
+    if (copyBtn) copyBtn.onclick = () => {
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(python).then(() => { copyBtn.textContent='✓ Copié !'; setTimeout(()=>{copyBtn.textContent='📋 Copy'},2000); });
+      } else {
+        const ta=document.createElement('textarea'); ta.value=python;
+        ta.style.cssText='position:fixed;opacity:0'; document.body.appendChild(ta);
+        ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+        copyBtn.textContent='✓ Copié !'; setTimeout(()=>{copyBtn.textContent='📋 Copy'},2000);
+      }
+    };
+
+    // Télécharger
+    const dlBtn = document.getElementById('downloadPythonBtn');
+    if (dlBtn) dlBtn.onclick = () => {
+      const blob=new Blob([python],{type:'text/plain'});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a'); a.href=url;
+      a.download=filename.replace(/\.[^.]+$/,'')+'.py'; a.click();
+      URL.revokeObjectURL(url);
+    };
+
+  } catch (err) {
+    statusEl.innerHTML = '<span style="color:var(--red)">✗ ' + err.message + '</span>';
+    console.warn('API unavailable:', err.message);
+    statusEl.innerHTML = '<span style="color:var(--yellow)">API unavailable — generating offline skeleton…</span>';
+    try {
+      const py = cobolToPythonFallback(f.parsed, f.rawText || f.content || '');
+      const esc2 = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const KW = /\b(def|class|import|from|return|if|elif|else|for|while|in|not|and|or|True|False|None|try|except|with|as|pass|break|continue|raise|dataclass|field)\b/g;
+      const TY = /\b(str|int|float|bool|list|dict|Optional|List|Dict|Any|Union|Path)\b/g;
+      codeEl.innerHTML = py.split('\n').map(line => {
+        const e = esc2(line);
+        if (e.trimStart().startsWith('#')) return '<span style="color:#4a5168;font-style:italic">'+e+'</span>';
+        return e.replace(KW,'<span style="color:#a78bfa;font-weight:600">$1</span>').replace(TY,'<span style="color:#38bdf8">$1</span>');
+      }).join('\n');
+      outputEl.style.display = 'block';
+      statusEl.innerHTML = '<span style="color:var(--yellow)">⚡ Offline skeleton — ' + py.split('\n').length + ' lines (AI unavailable)</span>';
+      document.getElementById('copyPythonBtn').onclick = () => { navigator.clipboard?.writeText(py); };
+      document.getElementById('downloadPythonBtn').onclick = () => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([py],{type:'text/plain'}));
+        a.download = filename.replace(/\.[^.]+$/, '') + '.py'; a.click();
+      };
+    } catch(fe) { statusEl.innerHTML = '<span style="color:var(--red)">✗ ' + err.message + '</span>'; }
+  }
+  btn.disabled = false;
+  btn.textContent = '⚡ Translate';
+}
+
+
+// Branchement direct translateBtn
+document.getElementById('translateBtn')?.addEventListener('click', () => {
+  const sel = document.getElementById('translateFileSelect');
+  if (sel?.value) translateCobolToPython(sel.value);
+});
+
+function runAnalysis() {
+  const names = Object.keys(loadedFiles);
+  if (!names.length) return;
+
+  resetUI();
+  const parseBtn = document.getElementById('parseBtn');
+  parseBtn.disabled = true;
+  parseBtn.textContent = '⏳ Analyzing…';
+
+  setTimeout(() => {
+    try {
+      let allFrombugLog = [];
+      let jclCount = 0, cobolCount = 0, unknownCount = 0;
+
+      for (const name of names) {
+        const f = loadedFiles[name];
+
+        if (f.language === 'jcl') {
+          jclCount++;
+          const { jobs, warnings, debugLog } = parseJCL(f.content);
+          jobs.forEach(j => {
+            j.sourceFile = name;
+            if (j.synthetic && j.name === '_IMPLICIT') {
+              j.name = name.replace(/\.[^.]+$/, '').toUpperCase().substring(0, 8);
+              j.title = j.title || `From ${name}`;
+            }
+          });
+          f.parsed = { jobs, warnings };
+          allFrombugLog = allFrombugLog.concat([`=== ${name} (JCL) ===`], debugLog || []);
+
+        } else if (f.language === 'cobol') {
+          cobolCount++;
+          const result = parseCOBOL(f.content, name);
+          f.parsed = result;
+          allFrombugLog = allFrombugLog.concat([`=== ${name} (COBOL) ===`], result.debugLog || []);
+
+        } else {
+          unknownCount++;
+          allFrombugLog.push(`=== ${name} (language not identified — ignored) ===`);
+        }
+      }
+
+      // ── Construire le modèle unifié à partir de tous les fichiers parsés ──
+      const model = buildSystemModel();
+
+      // ── Frombug tab ──────────────────────────────────────────
+      document.getElementById('debugContainer').style.display = 'block';
+      document.getElementById('emptyFrombug').style.display = 'none';
+      const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      document.getElementById('debugLog').innerHTML = allFrombugLog.map(l => {
+        const s = String(l);
+        let color = 'var(--text3)', bg = '';
+        if (s.startsWith('=== ')) { color = 'var(--accent)'; bg = 'background:rgba(78,155,255,0.06);border-radius:3px;padding:2px 6px'; }
+        else if (s.startsWith('STMT: name=') && s.includes('kw=JOB'))  color = 'var(--accent)';
+        else if (s.startsWith('STMT: name=') && s.includes('kw=EXEC')) color = 'var(--purple)';
+        else if (s.startsWith('STMT: name=') && s.includes('kw=DD'))   color = 'var(--cyan)';
+        else if (s.startsWith('STMT:'))    color = 'var(--green)';
+        else if (s.startsWith('SKIP'))     color = 'var(--red)';
+        else if (s.startsWith('DIVISION')) color = 'var(--purple)';
+        else if (s.startsWith('PROGRAM-ID')) color = 'var(--green)';
+        return `<div style="color:${color};${bg};white-space:nowrap">${esc(s)}</div>`;
+      }).join('');
+
+      // ── Stats sidebar ────────────────────────────────────────
+      renderStatsGrid([
+        ['statNodes', model.nodes.length, 'Nodes'],
+        ['statEdges', model.edges.length, 'Edges'],
+        ['statJcl', jclCount, 'JCL Files'],
+        ['statCobol', cobolCount, 'COBOL Files'],
+      ]);
+
+      // ── Rendu des onglets (branché à l'étape suivante : carte du système) ──
+      _lastModel = model;
+      initSearch();
+      initExports();
+      if (typeof renderSystemMap === 'function') renderSystemMap(model);
+      if (typeof renderPrograms === 'function') renderPrograms(model);
+      if (typeof renderDataTab === 'function') renderDataTab(model);
+      if (typeof renderFlowTab === 'function') renderFlowTab(model);
+      if (typeof renderSourceTab === 'function') renderSourceTab();
+      if (typeof renderTranslateTab === 'function') renderTranslateTab();
+      if (typeof renderSummaryTab === 'function') renderSummaryTab(model, { jclCount, cobolCount, unknownCount });
+
+      const nf = names.length;
+      parseBtn.textContent = `✓ ${nf} fichier${nf>1?'s analysés':' analysé'} · ${model.nodes.length} nœuds · ${model.edges.length} liens`;
+      parseBtn.style.background = 'rgba(61,214,140,0.15)';
+      parseBtn.style.color = 'var(--green)';
+      parseBtn.style.border = '1px solid rgba(61,214,140,0.3)';
+    } catch (err) {
+      parseBtn.textContent = `✗ Erreur : ${err.message}`;
+      parseBtn.style.background = 'rgba(240,101,96,0.12)';
+      parseBtn.style.color = 'var(--red)';
+      parseBtn.style.border = '1px solid rgba(240,101,96,0.3)';
+      console.error('Analysis error:', err);
+    }
+    parseBtn.disabled = false;
+  }, 400);
+}
+
+document.getElementById('parseBtn').addEventListener('click', runAnalysis);
+
+// ═══════════════════════════════════════════════════════════
+//  THEME TOGGLE
+// ═══════════════════════════════════════════════════════════
+(function() {
+  const btn = document.getElementById('themeToggle');
+  const saved = localStorage.getItem('reforge-theme') || 'dark';
+  if (saved === 'light') document.body.classList.add('light');
+  if (btn) btn.addEventListener('click', () => {
+    document.body.classList.toggle('light');
+    const theme = document.body.classList.contains('light') ? 'light' : 'dark';
+    localStorage.setItem('reforge-theme', theme);
+  });
+})();
+
+// ═══════════════════════════════════════════════════════════
+//  GLOBAL SEARCH
+// ═══════════════════════════════════════════════════════════
+let _lastModel = null; // stocké après chaque analyse
+
+function initSearch() {
+  const input = document.getElementById('searchInput');
+  const count = document.getElementById('searchCount');
+  const bar   = document.getElementById('searchBar');
+  if (!input) return;
+  bar.style.display = 'flex';
+
+  input.addEventListener('input', () => {
+    const q = input.value.trim().toLowerCase();
+    if (!q || !_lastModel) { count.textContent = ''; clearHighlights(); return; }
+
+    const matches = _lastModel.nodes.filter(n =>
+      (n.label||'').toLowerCase().includes(q) ||
+      (n.kind||'').toLowerCase().includes(q) ||
+      (n.sourceFile||'').toLowerCase().includes(q)
+    );
+    count.textContent = matches.length ? `${matches.length} result${matches.length>1?'s':''}` : 'No results';
+    highlightNodes(matches.map(n => n.id), q);
+  });
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { input.value=''; count.textContent=''; clearHighlights(); }
+  });
+
+  // Ctrl+F / Cmd+F → focus search
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey||e.metaKey) && e.key==='f') {
+      e.preventDefault();
+      input.focus(); input.select();
+    }
+  });
+}
+
+function highlightNodes(ids, query) {
+  // Highlight dans l'onglet Programs
+  document.querySelectorAll('.job-name, .job-class, .cell-mono').forEach(el => {
+    const text = el.textContent;
+    if (!query) { el.innerHTML = escHtml(text); return; }
+    const re = new RegExp('('+query.replace(/[.*+?^${}()|\[\]\\]/g,'\\$&')+')', 'gi');
+    el.innerHTML = escHtml(text).replace(re, '<mark class="search-highlight">$1</mark>');
+  });
+}
+
+function clearHighlights() {
+  document.querySelectorAll('.job-name, .job-class, .cell-mono').forEach(el => {
+    el.textContent = el.textContent; // reset
+  });
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ═══════════════════════════════════════════════════════════
+//  EXPORT SVG / JSON / CSV
+// ═══════════════════════════════════════════════════════════
+function initExports() {
+  const bar = document.getElementById('exportBar');
+  if (bar) bar.classList.add('show');
+
+  document.getElementById('exportSvgBtn')?.addEventListener('click', exportSVG);
+  document.getElementById('exportJsonBtn')?.addEventListener('click', exportJSON);
+  document.getElementById('exportCsvBtn')?.addEventListener('click', exportCSV);
+}
+
+function downloadBlob(content, filename, type) {
+  const blob = new Blob([content], { type });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportSVG() {
+  var svgEl=document.querySelector('#mapContainer svg');
+  if (!svgEl) { alert('Run analysis first.'); return; }
+  var clone=svgEl.cloneNode(true);
+  clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+  var bg=document.createElementNS('http://www.w3.org/2000/svg','rect');
+  bg.setAttribute('width','100%');bg.setAttribute('height','100%');
+  bg.setAttribute('fill',document.body.classList.contains('light')?'#f5f6fa':'#0d0f14');
+  clone.insertBefore(bg,clone.firstChild);
+  var d=String.fromCharCode(60,63)+'xml version="1.0" encoding="UTF-8"'+String.fromCharCode(63,62);
+  downloadBlob(d+'\n'+clone.outerHTML,'reforge-system-map.svg','image/svg+xml');
+}
+
+function exportJSON() {
+  if (!_lastModel) { alert('Run analysis first.'); return; }
+  const out = {
+    meta: { tool:'Reforge Legacy Analyzer', version:'2.0', exported: new Date().toISOString() },
+    nodes: _lastModel.nodes.map(n => ({
+      id: n.id, kind: n.kind, language: n.language,
+      label: n.label, sourceFile: n.sourceFile, meta: n.meta,
+    })),
+    edges: _lastModel.edges.map(e => ({
+      from: e.from, to: e.to, kind: e.kind, label: e.label,
+    })),
+  };
+  downloadBlob(JSON.stringify(out, null, 2), 'reforge-system-model.json', 'application/json');
+}
+
+function exportCSV() {
+  if (!_lastModel) { alert('Run analysis first.'); return; }
+  var Q=function(v){return '"'+String(v||'').replace(/"/g,'""')+'"';};
+  var nl='\n';
+  var nh=['id','kind','language','label','sourceFile'].map(Q).join(',');
+  var nr=_lastModel.nodes.map(function(n){return [n.id,n.kind,n.language,n.label,n.sourceFile||''].map(Q).join(',');});
+  var eh=['from','to','kind','label'].map(Q).join(',');
+  var er=_lastModel.edges.map(function(e){return [e.from,e.to,e.kind,e.label||''].map(Q).join(',');});
+  downloadBlob([nh].concat(nr).concat(['','',eh]).concat(er).join(nl),'reforge-system-model.csv','text/csv');
+}
+
+// ═══════════════════════════════════════════════════════════
+//  FALLBACK TRADUCTION COBOL→PYTHON (hors ligne)
+//  Utilisé si l'API Anthropic n'est pas disponible
+// ═══════════════════════════════════════════════════════════
+function cobolToPythonFallback(parsed, rawSource) {
+  var L = [];
+  var nl = '\n';
+  var tq = '\x22\x22\x22';
+  L.push(tq);
+  L.push('Reforge Legacy Analyzer - Auto-generated Python skeleton');
+  L.push('PROGRAM-ID: ' + ((parsed && parsed.programName) || 'UNKNOWN'));
+  L.push('Generated: ' + new Date().toISOString());
+  L.push('WARNING: Basic skeleton - review before production use.');
+  L.push(tq);
+  L.push('from __future__ import annotations');
+  L.push('from dataclasses import dataclass, field');
+  L.push('from typing import Optional, List');
+  L.push('from pathlib import Path');
+  L.push('');
+  if (!parsed) { L.push('pass  # Could not parse COBOL source'); return L.join(nl); }
+  for (var cb of (parsed.copyBooks||[])) {
+    L.push('@dataclass');
+    L.push('class ' + _toPyName(cb.name) + ':');
+    L.push('    pass  # TODO: from ' + cb.name + ' copybook');
+    L.push('');
+  }
+  var lvl01 = (parsed.wsItems||[]).filter(function(w){return w.level===1;});
+  var other  = (parsed.wsItems||[]).filter(function(w){return w.level>1;});
+  for (var item of lvl01) {
+    L.push('@dataclass');
+    L.push('class ' + _toPyName(item.name) + ':');
+    var ch = other.filter(function(w){return w.pic;});
+    if (!ch.length) { L.push('    pass  # TODO: define fields'); }
+    else { for (var c of ch.slice(0,10)) { var pt=_picType(c.pic||''); L.push('    '+_toPyName(c.name,true)+': '+pt+' = '+_defVal(pt)); } }
+    L.push('');
+  }
+  var lvl77 = (parsed.wsItems||[]).filter(function(w){return w.level===77;});
+  if (lvl77.length) {
+    L.push('# Level 77 variables');
+    for (var v77 of lvl77) { var t77=_picType(v77.pic||''); L.push(_toPyName(v77.name,true)+': '+t77+' = '+_defVal(t77)); }
+    L.push('');
+  }
+  if ((parsed.files||[]).length) {
+    L.push('# File handles');
+    for (var pf of parsed.files) { L.push('_f_'+_toPyName(pf.fileName,true)+': Optional[Path] = None  # ASSIGN '+( pf.assignTo||'?')); }
+    L.push('');
+  }
+  for (var para of (parsed.paragraphs||[])) {
+    L.push('def ' + _toPyName(para.name,true) + '() -> None:');
+    L.push('    ' + tq + 'COBOL: ' + para.name + tq);
+    var calls=(parsed.calls||[]).filter(function(c){return c.from===para.name;});
+    if (calls.length) {
+      for (var ca of calls) {
+        if (ca.type==='PERFORM') L.push('    '+_toPyName(ca.target,true)+'()  # PERFORM '+ca.target);
+        else if (ca.type==='CALL') L.push('    pass  # CALL '+ca.target+' TODO');
+        else L.push('    pass  # GOTO '+ca.target+' TODO');
+      }
+    } else { L.push('    pass  # TODO'); }
+    L.push('');
+  }
+  L.push('if __name__ == ' + '\x22__main__\x22' + ':');
+  var mp=(parsed.paragraphs||[]).find(function(p){return p.name.includes('MAIN')||p.name.startsWith('0000');});
+  if (mp) L.push('    '+_toPyName(mp.name,true)+'()');
+  else if ((parsed.paragraphs||[]).length) L.push('    '+_toPyName(parsed.paragraphs[0].name,true)+'()');
+  else L.push('    pass');
+  return L.join(nl);
+}
+function _toPyName(name, asVar) {
+  var s=(name||'X').replace(/[-\s]/g,'_').replace(/[^A-Za-z0-9_]/g,'').toLowerCase();
+  return asVar?s:s.charAt(0).toUpperCase()+s.slice(1);
+}
+function _picType(pic) {
+  var p=pic.toUpperCase();
+  if (p.includes('V')||p.includes('S9')) return 'float';
+  if (/^[S]?9/.test(p)) return 'int';
+  return 'str';
+}
+function _defVal(t) { return t==='int'?'0':t==='float'?'0.0':'""'; }
+</script>
+</body>
+</html>
