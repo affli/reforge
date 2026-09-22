@@ -12,15 +12,6 @@
 <meta property="og:description" content="Analyze JCL and COBOL mainframe files, interactive system map, AI-powered COBOL→Python translation. Free.">
 <meta property="og:type" content="website">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
-<!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-2QT4G0E0VZ"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-
-  gtag('config', 'G-2QT4G0E0VZ');
-</script>
 <style>
   :root {
     --bg:       #0d0f14;
@@ -446,10 +437,11 @@
   }
   .export-bar.show { display:flex; }
   .export-btn {
-    padding:5px 12px; background:transparent;
-    border:1px solid var(--border2); border-radius:4px;
+    padding:6px 14px; background:var(--bg2);
+    border:1px solid var(--border2); border-radius:6px;
     color:var(--text2); font-family:'IBM Plex Mono',monospace;
-    font-size:10px; cursor:pointer; transition:all 0.15s;
+    font-size:11px; font-weight:500; cursor:pointer;
+    transition:all 0.15s; letter-spacing:0.02em;
   }
   .export-btn:hover { border-color:var(--accent); color:var(--accent); background:rgba(78,155,255,0.06); }
 
@@ -507,20 +499,6 @@
     </div>
 
     <button class="parse-btn" id="parseBtn">▶ Analyze</button>
-
-    <div class="search-bar" id="searchBar" style="display:none">
-      <span class="search-icon">⌕</span>
-      <input class="search-input" id="searchInput" placeholder="Search nodes, files, programs…" autocomplete="off">
-      <span class="search-count" id="searchCount"></span>
-    </div>
-
-    <div class="export-bar" id="exportBar">
-      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text3)">Export:</span>
-      <button class="export-btn" id="exportSvgBtn">SVG</button>
-      <button class="export-btn" id="exportJsonBtn">JSON</button>
-      <button class="export-btn" id="exportCsvBtn">CSV</button>
-    </div>
-
     <div class="stats-grid" id="statsGrid" style="display:none"></div>
   </div>
 
@@ -528,13 +506,13 @@
   <div class="right-panel">
     <div class="tabs" id="mainTabs">
       <div class="tab active" data-tab="map">System Map</div>
-      <div class="tab" data-tab="programs">Programmes</div>
-      <div class="tab" data-tab="data">Données</div>
+      <div class="tab" data-tab="programs">Programs</div>
+      <div class="tab" data-tab="data">Data</div>
       <div class="tab" data-tab="flow">Flow</div>
       <div class="tab" data-tab="source">Source</div>
       <div class="tab" data-tab="translate" style="color:var(--purple)">⚡ Python</div>
       <div class="tab" data-tab="summary">Summary</div>
-      <div class="tab" data-tab="debug" style="color:var(--red)">Frombug</div>
+      <div class="tab" data-tab="debug" style="color:var(--red)">Debug</div>
     </div>
 
     <div class="tab-content active scrollbar-custom" id="tab-map">
@@ -544,6 +522,25 @@
         <div class="empty-sub">Drop your JCL and/or COBOL files — the system map will appear here once analysis is complete.</div>
       </div>
       <div id="mapContainer" style="display:none"></div>
+
+      <!-- Toolbar : filtres + export — visible après analyse -->
+      <div id="mapToolbar" style="display:none;align-items:center;gap:8px;margin-top:14px;flex-wrap:wrap">
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text3)">Filter:</span>
+          <button class="filter-btn active" data-mapfilter="all">All</button>
+          <button class="filter-btn" data-mapfilter="job">Jobs</button>
+          <button class="filter-btn" data-mapfilter="step">Steps</button>
+          <button class="filter-btn" data-mapfilter="program">Programs</button>
+          <button class="filter-btn" data-mapfilter="paragraph">Paragraphs</button>
+          <button class="filter-btn" data-mapfilter="dataset">Data</button>
+        </div>
+        <div style="flex:1"></div>
+        <div style="display:flex;gap:6px">
+          <button class="export-btn" id="exportSvgBtn" title="Download system map as SVG">⬇ SVG</button>
+          <button class="export-btn" id="exportJsonBtn" title="Download model as JSON">⬇ JSON</button>
+          <button class="export-btn" id="exportCsvBtn" title="Download model as CSV">⬇ CSV</button>
+        </div>
+      </div>
     </div>
 
     <div class="tab-content scrollbar-custom" id="tab-programs">
@@ -580,17 +577,59 @@
         <div class="empty-sub">Analyze a COBOL file then select it here to generate equivalent Python code via AI.</div>
       </div>
       <div id="translateContainer" style="display:none">
+
+        <!-- API Key Banner -->
+        <div id="apiKeyBanner" style="background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:14px 16px;margin-bottom:16px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="flex:1;min-width:200px">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text);margin-bottom:4px;font-weight:500">
+                🔑 Anthropic API Key
+              </div>
+              <div style="font-size:10px;color:var(--text3);font-family:'IBM Plex Mono',monospace">
+                Required for AI translation. Get one free at
+                <a href="https://console.anthropic.com" target="_blank" style="color:var(--accent);text-decoration:none">console.anthropic.com</a>
+                — stored locally, never sent to our servers.
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="password" id="apiKeyInput" placeholder="sk-ant-api03-…"
+                style="font-family:'IBM Plex Mono',monospace;font-size:11px;padding:7px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);outline:none;width:260px;transition:border-color 0.15s"
+                onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+              <button id="saveApiKeyBtn"
+                style="padding:7px 14px;background:var(--accent2);border:none;border-radius:6px;color:#fff;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;cursor:pointer;white-space:nowrap;transition:background 0.2s"
+                onmouseover="this.style.background='var(--accent)'" onmouseout="this.style.background='var(--accent2)'">
+                Save key
+              </button>
+              <button id="clearApiKeyBtn" style="display:none;padding:7px 10px;background:transparent;border:1px solid var(--border2);border-radius:6px;color:var(--text3);font-family:'IBM Plex Mono',monospace;font-size:11px;cursor:pointer">
+                Clear
+              </button>
+            </div>
+          </div>
+          <div id="apiKeyStatus" style="margin-top:8px;font-family:'IBM Plex Mono',monospace;font-size:10px;display:none"></div>
+        </div>
+
+        <!-- Translate controls -->
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap">
           <div class="section-title" style="margin:0;flex:1">COBOL → Python Translation</div>
           <select id="translateFileSelect" style="font-family:'IBM Plex Mono',monospace;font-size:10px;background:var(--bg3);color:var(--text2);border:1px solid var(--border);border-radius:4px;padding:4px 8px"></select>
-          <button id="translateBtn" style="padding:8px 16px;background:var(--purple);border:none;border-radius:6px;color:#fff;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;cursor:pointer;transition:all 0.2s">⚡ Translate</button>
+          <button id="translateBtn" style="padding:8px 16px;background:var(--purple);border:none;border-radius:6px;color:#fff;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;cursor:pointer;transition:all 0.2s"
+            onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
+            ⚡ Translate with AI
+          </button>
+          <button id="translateOfflineBtn" style="padding:8px 14px;background:transparent;border:1px solid var(--border2);border-radius:6px;color:var(--text2);font-family:'IBM Plex Mono',monospace;font-size:11px;cursor:pointer;transition:all 0.2s"
+            title="Generate Python skeleton without AI (no API key needed)"
+            onmouseover="this.style.borderColor='var(--green)';this.style.color='var(--green)'" onmouseout="this.style.borderColor='var(--border2)';this.style.color='var(--text2)'">
+            ⚙ Offline Skeleton
+          </button>
         </div>
+
         <div id="translateStatus" style="display:none;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text2);margin-bottom:12px;padding:10px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:6px"></div>
+
         <div id="translateOutput" style="display:none">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-            <div class="section-title" style="margin:0;flex:1">Code Python généré</div>
+            <div class="section-title" style="margin:0;flex:1">Generated Python code</div>
             <button id="downloadPythonBtn" style="padding:5px 12px;background:transparent;border:1px solid var(--border2);border-radius:4px;color:var(--text2);font-family:'IBM Plex Mono',monospace;font-size:10px;cursor:pointer">⬇ .py</button>
-          <button id="copyPythonBtn" style="padding:5px 12px;background:transparent;border:1px solid var(--border2);border-radius:4px;color:var(--text2);font-family:'IBM Plex Mono',monospace;font-size:10px;cursor:pointer">📋 Copy</button>
+            <button id="copyPythonBtn" style="padding:5px 12px;background:transparent;border:1px solid var(--border2);border-radius:4px;color:var(--text2);font-family:'IBM Plex Mono',monospace;font-size:10px;cursor:pointer">📋 Copy</button>
           </div>
           <div id="pythonCode" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;line-height:1.75;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:14px;overflow-x:auto;white-space:pre;max-height:70vh;overflow-y:auto"></div>
         </div>
@@ -623,6 +662,11 @@
     </div>
 
     <div class="tab-content scrollbar-custom" id="tab-debug">
+      <div class="empty-state" id="emptyDebug">
+        <div class="empty-icon">🔬</div>
+        <div class="empty-title">No analysis run yet</div>
+        <div class="empty-sub">The parsing log will appear here after analysis.</div>
+      </div>
       <div class="empty-state" id="emptyFrombug">
         <div class="empty-icon">🔬</div>
         <div class="empty-title">No analysis run yet</div>
@@ -1636,7 +1680,7 @@ function colorOperands(str, kw) {
 //    'DAILYBAT.JCL': { ... language: 'jcl' ... }
 //  }
 // ═══════════════════════════════════════════════════════════════
-let loadedFiles = {};
+var loadedFiles = {};
 
 // ── Détection de langage — point d'entrée unique ──────────────
 // Retourne 'jcl' | 'cobol' | 'unknown'
@@ -1994,7 +2038,7 @@ function removeFile(name) {
 }
 
 // ── Drag & drop / input file ────────────────────────────────────
-document.getElementById('fileInput').addEventListener('change', (e) => {
+document.getElementById('fileInput')?.addEventListener('change', (e) => {
   if (e.target.files.length) {
     loadFilesIntoState([...e.target.files]);
     // Reset input pour permettre de re-sélectionner le même fichier
@@ -2002,71 +2046,62 @@ document.getElementById('fileInput').addEventListener('change', (e) => {
   }
 });
 
-const dz = document.getElementById('dropZone');
-dz.addEventListener('dragover', e => { e.preventFromfault(); dz.classList.add('drag-over'); });
+var dz = document.getElementById('dropZone'); if (!dz) dz = {};
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
 dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
 dz.addEventListener('drop', e => {
-  e.preventFromfault();
+  e.preventDefault();
   dz.classList.remove('drag-over');
   if (e.dataTransfer.files.length) loadFilesIntoState([...e.dataTransfer.files]);
 });
 
 // ── Coller du code directement ──────────────────────────────────
-const pasteToggleBtn = document.getElementById('pasteToggleBtn');
-const pastePanel      = document.getElementById('pastePanel');
-const pasteTextarea   = document.getElementById('pasteTextarea');
-const pasteFilenameEl = document.getElementById('pasteFilename');
-const pasteAddBtn     = document.getElementById('pasteAddBtn');
 
-pasteToggleBtn.addEventListener('click', () => {
-  const isOpen = pastePanel.style.display !== 'none';
-  pastePanel.style.display = isOpen ? 'none' : 'block';
-  pasteToggleBtn.classList.toggle('active', !isOpen);
-  if (!isOpen) pasteTextarea.focus();
-});
+// ── Zone de collage — initialisée après chargement du DOM ─────
+function initPasteZone() {
+  var pasteToggleBtn = document.getElementById('pasteToggleBtn');
+  var pastePanel     = document.getElementById('pastePanel');
+  var pasteTextarea  = document.getElementById('pasteTextarea');
+  var pasteFilename  = document.getElementById('pasteFilename');
+  var pasteAddBtn    = document.getElementById('pasteAddBtn');
+  if (!pasteToggleBtn) return;
+
+  pasteToggleBtn.addEventListener('click', function() {
+    var isOpen = pastePanel.style.display !== 'none';
+    pastePanel.style.display = isOpen ? 'none' : 'block';
+    pasteToggleBtn.classList.toggle('active', !isOpen);
+    if (!isOpen && pasteTextarea) pasteTextarea.focus();
+  });
+
+  if (pasteAddBtn) pasteAddBtn.addEventListener('click', addPastedCode);
+  if (pasteTextarea) {
+    pasteTextarea.addEventListener('keydown', function(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault(); addPastedCode();
+      }
+    });
+  }
+}
+
+
 
 function generatePasteFilename(text) {
-  // Fromvine une extension plausible à partir d'une détection rapide du contenu
-  const lang = detectLanguage('pasted', text);
-  const ext = lang === 'cobol' ? 'cbl' : lang === 'jcl' ? 'jcl' : 'txt';
-  let n = 1;
-  let name = `collé-${n}.${ext}`;
-  while (loadedFiles[name]) { n++; name = `collé-${n}.${ext}`; }
+  var lang = detectLanguage('paste', text);
+  var ext  = lang === 'cobol' ? 'cbl' : lang === 'jcl' ? 'jcl' : 'txt';
+  var prefix = lang === 'cobol' ? 'program' : lang === 'jcl' ? 'job' : 'file';
+  var n = 1;
+  var name = prefix + '-' + n + '.' + ext;
+  while (loadedFiles[name]) { n++; name = prefix + '-' + n + '.' + ext; }
   return name;
 }
 
-function addPastedCode() {
-  const code = pasteTextarea.value;
-  if (!code.trim()) { pasteTextarea.focus(); return; }
-
-  let filename = pasteFilenameEl.value.trim() || generatePasteFilename(code);
-  if (!filename.includes('.')) {
-    const lang = detectLanguage(filename, code);
-    filename += lang === 'cobol' ? '.cbl' : lang === 'jcl' ? '.jcl' : '.txt';
-  }
-
-  const bytes = new TextEncoder().encode(code);
-  resetUI();
-  const { text, encoding, warning } = detectAndDecode(bytes.buffer);
-  ingestFile(filename, text, encoding, warning, bytes.byteLength, true);
-  renderFileList();
-
-  pasteTextarea.value = '';
-  pasteFilenameEl.value = '';
-  pastePanel.style.display = 'none';
-  pasteToggleBtn.classList.remove('active');
-}
-
-pasteAddBtn.addEventListener('click', addPastedCode);
-pasteTextarea.addEventListener('keydown', e => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventFromfault(); addPastedCode(); }
-});
 
 // ── Réinitialisation de l'UI entre deux analyses ───────────────
 function resetUI() {
   document.getElementById('emptyMap').style.display = 'flex';
   document.getElementById('mapContainer').style.display = 'none';
   document.getElementById('mapContainer').innerHTML = '';
+  var _mt=document.getElementById('mapToolbar'); if(_mt) _mt.style.display='none';
 
   document.getElementById('emptyPrograms').style.display = 'flex';
   document.getElementById('programsContainer').style.display = 'none';
@@ -2096,7 +2131,7 @@ function resetUI() {
   if (tStatus) tStatus.style.display = 'none';
   if (tOutput) tOutput.style.display = 'none';
 
-  document.getElementById('emptyFrombug').style.display = 'flex';
+  document.getElementById('emptyDebug').style.display = 'flex';
   document.getElementById('debugContainer').style.display = 'none';
   document.getElementById('debugLog').innerHTML = '';
 
@@ -2215,10 +2250,10 @@ function renderSystemMap(model) {
 
   // Pan drag
   let drag=false,dx=0,dy=0,vx0=0,vy0=0;
-  svg.addEventListener('mousedown',e=>{if(e.button!==0)return;drag=true;dx=e.clientX;dy=e.clientY;vx0=vx;vy0=vy;svg.style.cursor='grabbing';e.preventFromfault()});
+  svg.addEventListener('mousedown',e=>{if(e.button!==0)return;drag=true;dx=e.clientX;dy=e.clientY;vx0=vx;vy0=vy;svg.style.cursor='grabbing';e.preventDefault()});
   window.addEventListener('mousemove',e=>{if(!drag)return;vx=vx0+(e.clientX-dx);vy=vy0+(e.clientY-dy);applyT()});
   window.addEventListener('mouseup',()=>{drag=false;svg.style.cursor='grab'});
-  svg.addEventListener('wheel',e=>{e.preventFromfault();const r=wrap.getBoundingClientRect();zoomTo(e.deltaY<0?1.15:0.87,e.clientX-r.left,e.clientY-r.top)},{passive:false});
+  svg.addEventListener('wheel',e=>{e.preventDefault();const r=wrap.getBoundingClientRect();zoomTo(e.deltaY<0?1.15:0.87,e.clientX-r.left,e.clientY-r.top)},{passive:false});
 
   wrap.appendChild(svg); wrap.appendChild(tip); wrap.appendChild(zbar);
   cont.appendChild(wrap);
@@ -2588,133 +2623,185 @@ async function translateCobolToPython(filename) {
   const f = loadedFiles[filename];
   if (!f || f.language !== 'cobol') return;
 
-  const btn      = document.getElementById('translateBtn');
-  const statusEl = document.getElementById('translateStatus');
-  const outputEl = document.getElementById('translateOutput');
-  const codeEl   = document.getElementById('pythonCode');
-  if (!btn || !statusEl || !outputEl || !codeEl) return;
+  const apiKey  = getApiKey();
+  const btn     = document.getElementById('translateBtn');
+  const statusEl= document.getElementById('translateStatus');
+  const outputEl= document.getElementById('translateOutput');
+
+  if (!apiKey) {
+    statusEl.style.display = 'block';
+    statusEl.innerHTML = '<span style="color:var(--yellow)">⚠ No API key — add your Anthropic key above, or use <b>Offline Skeleton</b>.</span>';
+    return;
+  }
 
   btn.disabled = true;
   btn.textContent = '⏳ Translating…';
   statusEl.style.display = 'block';
-  statusEl.innerHTML = '<span style="color:var(--text3)">⏳ Analyzing COBOL program…</span>';
+  statusEl.innerHTML = '<span style="color:var(--text3)">⏳ Sending to Claude AI…</span>';
   outputEl.style.display = 'none';
 
   const parsed = f.parsed || {};
-  const ctx = parsed.programName ? [
-    'PROGRAM-ID: ' + parsed.programName,
-    'Files: ' + ((parsed.files||[]).map(x=>x.fileName+'→'+(x.assignTo||'?')).join(', ')||'none'),
-    'Working-Storage: ' + ((parsed.wsItems||[]).slice(0,20).map(w=>w.level+' '+w.name+(w.pic?' PIC '+w.pic:'')).join(', ')||'none'),
-    'Paragraphs: ' + ((parsed.paragraphs||[]).map(p=>p.name).join(', ')||'none'),
-    'Calls: ' + ((parsed.calls||[]).slice(0,15).map(c=>c.from+'['+c.type+']'+c.target).join(', ')||'none'),
-    'COPY: ' + ((parsed.copyBooks||[]).map(c=>c.name).join(', ')||'none'),
-  ].join('\n') : '';
+  var ctx = '';
+  if (parsed.programName) {
+    ctx = 'PROGRAM-ID: ' + parsed.programName + '\n'
+      + 'Files: ' + ((parsed.files||[]).map(function(x){return x.fileName+'→'+(x.assignTo||'?');}).join(', ')||'none') + '\n'
+      + 'Working-Storage: ' + ((parsed.wsItems||[]).slice(0,20).map(function(w){return w.level+' '+w.name+(w.pic?' PIC '+w.pic:'');}).join(', ')||'none') + '\n'
+      + 'Paragraphs: ' + ((parsed.paragraphs||[]).map(function(p){return p.name;}).join(', ')||'none') + '\n'
+      + 'Calls: ' + ((parsed.calls||[]).slice(0,15).map(function(c){return c.from+'['+c.type+']'+c.target;}).join(', ')||'none') + '\n'
+      + 'COPY: ' + ((parsed.copyBooks||[]).map(function(c){return c.name;}).join(', ')||'none');
+  }
 
-  const systemPrompt = 'You are an expert in migrating COBOL to Python 3.\n'
+  var sysPrompt = 'You are an expert in migrating COBOL to Python 3.\n'
     + 'STRICT RULES:\n'
     + '- Reply ONLY with pure Python code, no markdown, no explanation\n'
-    + '- Each COBOL paragraph → Python function with comment # (e.g. # 0000-MAIN)\n'
-    + '- Levels 01/05 → dataclasses with type hints\n'
-    + '- Missing COPY books → TODO class\n'
+    + '- Each COBOL paragraph becomes a Python function with comment # e.g. # 0000-MAIN\n'
+    + '- Levels 01/05 become dataclasses with type hints\n'
+    + '- Missing COPY books become TODO classes\n'
     + '- End with if __name__ == "__main__":\n';
 
-  const src = (f.rawText || f.content || '').slice(0, 8000);
-  const userPrompt = (ctx ? 'CONTEXT:\n' + ctx + '\n\n' : '') + 'COBOL SOURCE:\n' + src;
+  var src = (f.rawText || f.content || '').slice(0, 8000);
+  var userMsg = (ctx ? 'CONTEXT:\n' + ctx + '\n\n' : '') + 'COBOL SOURCE:\n' + src;
 
   try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    var resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 4096,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userPrompt }],
-      }),
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4096, system: sysPrompt, messages: [{ role: 'user', content: userMsg }] }),
     });
 
     if (!resp.ok) {
-      const e = await resp.json().catch(() => ({}));
-      throw new Error('API ' + resp.status + ': ' + (e.error?.message || resp.statusText));
+      var e = await resp.json().catch(function(){return {};});
+      throw new Error('API ' + resp.status + ': ' + (e.error && e.error.message || resp.statusText));
     }
 
-    const data = await resp.json();
-    const raw  = (data.content || []).map(b => b.text || '').join('').trim();
-    const python = raw.replace(/^```python\s*/i,'').replace(/^```\s*/,'').replace(/\s*```$/,'').trim();
+    var data = await resp.json();
+    var raw  = (data.content || []).map(function(b){return b.text||'';}).join('').trim();
+    var python = raw.replace(/^```python\s*/i,'').replace(/^```\s*/,'').replace(/\s*```$/,'').trim();
 
-    // Coloration syntaxique ligne par ligne (sécurisée)
-    const KEYWORDS = /\b(def|class|import|from|return|if|elif|else|for|while|in|not|and|or|True|False|None|try|except|finally|with|as|pass|break|continue|raise|lambda|yield|async|await|self)\b/g;
-    const TYPES    = /\b(str|int|float|bool|list|dict|tuple|set|Optional|List|Dict|Any|Union|dataclass|field)\b/g;
-
-    const highlighted = python.split('\n').map(line => {
-      const e = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      if (e.trimStart().startsWith('#')) return '<span style="color:#4a5168;font-style:italic">'+e+'</span>';
-      return e
-        .replace(KEYWORDS, '<span style="color:#a78bfa;font-weight:600">$1</span>')
-        .replace(TYPES,    '<span style="color:#38bdf8">$1</span>');
-    }).join('\n');
-
-    codeEl.innerHTML = highlighted;
-    outputEl.style.display = 'block';
-    statusEl.innerHTML = '<span style="color:var(--green)">✓ ' + python.split('\n').length + ' lines of Python generated</span>';
-
-    // Copier
-    const copyBtn = document.getElementById('copyPythonBtn');
-    if (copyBtn) copyBtn.onclick = () => {
-      if (navigator.clipboard) {
-        navigator.clipboard.writeText(python).then(() => { copyBtn.textContent='✓ Copié !'; setTimeout(()=>{copyBtn.textContent='📋 Copy'},2000); });
-      } else {
-        const ta=document.createElement('textarea'); ta.value=python;
-        ta.style.cssText='position:fixed;opacity:0'; document.body.appendChild(ta);
-        ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
-        copyBtn.textContent='✓ Copié !'; setTimeout(()=>{copyBtn.textContent='📋 Copy'},2000);
-      }
-    };
-
-    // Télécharger
-    const dlBtn = document.getElementById('downloadPythonBtn');
-    if (dlBtn) dlBtn.onclick = () => {
-      const blob=new Blob([python],{type:'text/plain'});
-      const url=URL.createObjectURL(blob);
-      const a=document.createElement('a'); a.href=url;
-      a.download=filename.replace(/\.[^.]+$/,'')+'.py'; a.click();
-      URL.revokeObjectURL(url);
-    };
+    renderPythonOutput(python, filename, 'ai');
+    statusEl.innerHTML = '<span style="color:var(--green)">✓ AI translation complete — ' + python.split('\n').length + ' lines of Python generated</span>';
 
   } catch (err) {
-    statusEl.innerHTML = '<span style="color:var(--red)">✗ ' + err.message + '</span>';
-    console.warn('API unavailable:', err.message);
-    statusEl.innerHTML = '<span style="color:var(--yellow)">API unavailable — generating offline skeleton…</span>';
-    try {
-      const py = cobolToPythonFallback(f.parsed, f.rawText || f.content || '');
-      const esc2 = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      const KW = /\b(def|class|import|from|return|if|elif|else|for|while|in|not|and|or|True|False|None|try|except|with|as|pass|break|continue|raise|dataclass|field)\b/g;
-      const TY = /\b(str|int|float|bool|list|dict|Optional|List|Dict|Any|Union|Path)\b/g;
-      codeEl.innerHTML = py.split('\n').map(line => {
-        const e = esc2(line);
-        if (e.trimStart().startsWith('#')) return '<span style="color:#4a5168;font-style:italic">'+e+'</span>';
-        return e.replace(KW,'<span style="color:#a78bfa;font-weight:600">$1</span>').replace(TY,'<span style="color:#38bdf8">$1</span>');
-      }).join('\n');
-      outputEl.style.display = 'block';
-      statusEl.innerHTML = '<span style="color:var(--yellow)">⚡ Offline skeleton — ' + py.split('\n').length + ' lines (AI unavailable)</span>';
-      document.getElementById('copyPythonBtn').onclick = () => { navigator.clipboard?.writeText(py); };
-      document.getElementById('downloadPythonBtn').onclick = () => {
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(new Blob([py],{type:'text/plain'}));
-        a.download = filename.replace(/\.[^.]+$/, '') + '.py'; a.click();
-      };
-    } catch(fe) { statusEl.innerHTML = '<span style="color:var(--red)">✗ ' + err.message + '</span>'; }
+    console.warn('API error:', err.message);
+    statusEl.innerHTML = '<span style="color:var(--yellow)">⚠ API error: ' + err.message + ' — falling back to offline skeleton</span>';
+    var py = cobolToPythonFallback(f.parsed, f.rawText || f.content || '');
+    renderPythonOutput(py, filename, 'offline');
   }
   btn.disabled = false;
-  btn.textContent = '⚡ Translate';
+  btn.textContent = '⚡ Translate with AI';
 }
 
 
-// Branchement direct translateBtn
-document.getElementById('translateBtn')?.addEventListener('click', () => {
-  const sel = document.getElementById('translateFileSelect');
-  if (sel?.value) translateCobolToPython(sel.value);
-});
+// ═══════════════════════════════════════════════════════════
+//  API KEY MANAGEMENT + TRANSLATION CONTROLS
+// ═══════════════════════════════════════════════════════════
+(function initApiKey() {
+  const input   = document.getElementById('apiKeyInput');
+  const saveBtn = document.getElementById('saveApiKeyBtn');
+  const clearBtn= document.getElementById('clearApiKeyBtn');
+  const status  = document.getElementById('apiKeyStatus');
+  if (!input) return;
+
+  // Restaurer la clé sauvegardée
+  const saved = localStorage.getItem('reforge-api-key');
+  if (saved) {
+    input.value = saved;
+    _showKeyStored(true);
+  }
+
+  function _showKeyStored(stored) {
+    if (stored) {
+      status.style.display = 'block';
+      status.innerHTML = '<span style="color:var(--green)">✓ API key saved — AI translation ready</span>';
+      clearBtn.style.display = 'inline-block';
+      saveBtn.textContent = 'Update key';
+    } else {
+      status.style.display = 'block';
+      status.innerHTML = '<span style="color:var(--text3)">No API key — only offline skeleton available</span>';
+      clearBtn.style.display = 'none';
+      saveBtn.textContent = 'Save key';
+    }
+  }
+
+  saveBtn.addEventListener('click', () => {
+    const key = input.value.trim();
+    if (!key) { status.style.display='block'; status.innerHTML='<span style="color:var(--red)">Please enter a valid API key</span>'; return; }
+    if (!key.startsWith('sk-ant-')) { status.style.display='block'; status.innerHTML='<span style="color:var(--yellow)">⚠ Key should start with sk-ant-api03-…</span>'; }
+    else {
+      localStorage.setItem('reforge-api-key', key);
+      _showKeyStored(true);
+    }
+  });
+
+  clearBtn.addEventListener('click', () => {
+    localStorage.removeItem('reforge-api-key');
+    input.value = '';
+    _showKeyStored(false);
+  });
+
+  // Translate with AI
+  document.getElementById('translateBtn')?.addEventListener('click', () => {
+    const sel = document.getElementById('translateFileSelect');
+    if (sel?.value) translateCobolToPython(sel.value);
+  });
+
+  // Translate offline
+  document.getElementById('translateOfflineBtn')?.addEventListener('click', () => {
+    const sel = document.getElementById('translateFileSelect');
+    if (sel?.value) translateCobolOffline(sel.value);
+  });
+})();
+
+function getApiKey() {
+  return localStorage.getItem('reforge-api-key') || '';
+}
+
+function translateCobolOffline(filename) {
+  const f = loadedFiles[filename];
+  if (!f || f.language !== 'cobol') return;
+  const statusEl = document.getElementById('translateStatus');
+  const outputEl = document.getElementById('translateOutput');
+  const codeEl   = document.getElementById('pythonCode');
+  statusEl.style.display = 'block';
+  statusEl.innerHTML = '<span style="color:var(--yellow)">⚙ Generating offline skeleton…</span>';
+  outputEl.style.display = 'none';
+  setTimeout(() => {
+    const py = cobolToPythonFallback(f.parsed, f.rawText || f.content || '');
+    renderPythonOutput(py, filename, 'offline');
+    statusEl.innerHTML = '<span style="color:var(--yellow)">⚙ Offline skeleton — ' + py.split('\n').length + ' lines (no AI)</span>';
+  }, 100);
+}
+
+function renderPythonOutput(python, filename, mode) {
+  const outputEl = document.getElementById('translateOutput');
+  const codeEl   = document.getElementById('pythonCode');
+  const KW = /\b(def|class|import|from|return|if|elif|else|for|while|in|not|and|or|True|False|None|try|except|finally|with|as|pass|break|continue|raise|dataclass|field|async|await)\b/g;
+  const TY = /\b(str|int|float|bool|list|dict|tuple|set|Optional|List|Dict|Any|Union|Path)\b/g;
+  const esc2 = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  codeEl.innerHTML = python.split('\n').map(line => {
+    const e = esc2(line);
+    if (e.trimStart().startsWith('#')) return '<span style="color:#4a5168;font-style:italic">'+e+'</span>';
+    return e.replace(KW,'<span style="color:#a78bfa;font-weight:600">$1</span>').replace(TY,'<span style="color:#38bdf8">$1</span>');
+  }).join('\n');
+  outputEl.style.display = 'block';
+
+  document.getElementById('copyPythonBtn').onclick = () => {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(python).then(() => {
+        var b=document.getElementById('copyPythonBtn'); b.textContent='✓ Copied!'; setTimeout(()=>{b.textContent='📋 Copy'},2000);
+      });
+    } else {
+      var ta=document.createElement('textarea'); ta.value=python; ta.style.cssText='position:fixed;opacity:0';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+      var b=document.getElementById('copyPythonBtn'); b.textContent='✓ Copied!'; setTimeout(()=>{b.textContent='📋 Copy'},2000);
+    }
+  };
+  document.getElementById('downloadPythonBtn').onclick = () => {
+    var a=document.createElement('a');
+    a.href=URL.createObjectURL(new Blob([python],{type:'text/plain'}));
+    a.download=filename.replace(/\.[^.]+$/,'')+'.py'; a.click();
+  };
+}
 
 function runAnalysis() {
   const names = Object.keys(loadedFiles);
@@ -2727,7 +2814,7 @@ function runAnalysis() {
 
   setTimeout(() => {
     try {
-      let allFrombugLog = [];
+      let allDebugLog = [];
       let jclCount = 0, cobolCount = 0, unknownCount = 0;
 
       for (const name of names) {
@@ -2744,28 +2831,28 @@ function runAnalysis() {
             }
           });
           f.parsed = { jobs, warnings };
-          allFrombugLog = allFrombugLog.concat([`=== ${name} (JCL) ===`], debugLog || []);
+          allDebugLog = allDebugLog.concat([`=== ${name} (JCL) ===`], debugLog || []);
 
         } else if (f.language === 'cobol') {
           cobolCount++;
           const result = parseCOBOL(f.content, name);
           f.parsed = result;
-          allFrombugLog = allFrombugLog.concat([`=== ${name} (COBOL) ===`], result.debugLog || []);
+          allDebugLog = allDebugLog.concat([`=== ${name} (COBOL) ===`], result.debugLog || []);
 
         } else {
           unknownCount++;
-          allFrombugLog.push(`=== ${name} (language not identified — ignored) ===`);
+          allDebugLog.push(`=== ${name} (language not identified — ignored) ===`);
         }
       }
 
       // ── Construire le modèle unifié à partir de tous les fichiers parsés ──
       const model = buildSystemModel();
 
-      // ── Frombug tab ──────────────────────────────────────────
+      // ── Debug tab ──────────────────────────────────────────
       document.getElementById('debugContainer').style.display = 'block';
-      document.getElementById('emptyFrombug').style.display = 'none';
+      document.getElementById('emptyDebug').style.display = 'none';
       const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      document.getElementById('debugLog').innerHTML = allFrombugLog.map(l => {
+      document.getElementById('debugLog').innerHTML = allDebugLog.map(l => {
         const s = String(l);
         let color = 'var(--text3)', bg = '';
         if (s.startsWith('=== ')) { color = 'var(--accent)'; bg = 'background:rgba(78,155,255,0.06);border-radius:3px;padding:2px 6px'; }
@@ -2789,7 +2876,6 @@ function runAnalysis() {
 
       // ── Rendu des onglets (branché à l'étape suivante : carte du système) ──
       _lastModel = model;
-      initSearch();
       initExports();
       if (typeof renderSystemMap === 'function') renderSystemMap(model);
       if (typeof renderPrograms === 'function') renderPrograms(model);
@@ -2815,7 +2901,9 @@ function runAnalysis() {
   }, 400);
 }
 
-document.getElementById('parseBtn').addEventListener('click', runAnalysis);
+document.getElementById('parseBtn')?.addEventListener('click', runAnalysis);
+initPasteZone();
+initPasteZone();
 
 // ═══════════════════════════════════════════════════════════
 //  THEME TOGGLE
@@ -2834,67 +2922,15 @@ document.getElementById('parseBtn').addEventListener('click', runAnalysis);
 // ═══════════════════════════════════════════════════════════
 //  GLOBAL SEARCH
 // ═══════════════════════════════════════════════════════════
-let _lastModel = null; // stocké après chaque analyse
-
-function initSearch() {
-  const input = document.getElementById('searchInput');
-  const count = document.getElementById('searchCount');
-  const bar   = document.getElementById('searchBar');
-  if (!input) return;
-  bar.style.display = 'flex';
-
-  input.addEventListener('input', () => {
-    const q = input.value.trim().toLowerCase();
-    if (!q || !_lastModel) { count.textContent = ''; clearHighlights(); return; }
-
-    const matches = _lastModel.nodes.filter(n =>
-      (n.label||'').toLowerCase().includes(q) ||
-      (n.kind||'').toLowerCase().includes(q) ||
-      (n.sourceFile||'').toLowerCase().includes(q)
-    );
-    count.textContent = matches.length ? `${matches.length} result${matches.length>1?'s':''}` : 'No results';
-    highlightNodes(matches.map(n => n.id), q);
-  });
-
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { input.value=''; count.textContent=''; clearHighlights(); }
-  });
-
-  // Ctrl+F / Cmd+F → focus search
-  document.addEventListener('keydown', e => {
-    if ((e.ctrlKey||e.metaKey) && e.key==='f') {
-      e.preventDefault();
-      input.focus(); input.select();
-    }
-  });
-}
-
-function highlightNodes(ids, query) {
-  // Highlight dans l'onglet Programs
-  document.querySelectorAll('.job-name, .job-class, .cell-mono').forEach(el => {
-    const text = el.textContent;
-    if (!query) { el.innerHTML = escHtml(text); return; }
-    const re = new RegExp('('+query.replace(/[.*+?^${}()|\[\]\\]/g,'\\$&')+')', 'gi');
-    el.innerHTML = escHtml(text).replace(re, '<mark class="search-highlight">$1</mark>');
-  });
-}
-
-function clearHighlights() {
-  document.querySelectorAll('.job-name, .job-class, .cell-mono').forEach(el => {
-    el.textContent = el.textContent; // reset
-  });
-}
-
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
+var _lastModel = null; // stocké après chaque analyse
 
 // ═══════════════════════════════════════════════════════════
 //  EXPORT SVG / JSON / CSV
 // ═══════════════════════════════════════════════════════════
 function initExports() {
-  const bar = document.getElementById('exportBar');
-  if (bar) bar.classList.add('show');
+  var tb = document.getElementById('mapToolbar');
+  if (tb) tb.style.display = 'flex';
+  const bar = document.
 
   document.getElementById('exportSvgBtn')?.addEventListener('click', exportSVG);
   document.getElementById('exportJsonBtn')?.addEventListener('click', exportJSON);
@@ -3026,6 +3062,30 @@ function _picType(pic) {
   return 'str';
 }
 function _defVal(t) { return t==='int'?'0':t==='float'?'0.0':'""'; }
+
+function addPastedCode() {
+  var pasteTextarea  = document.getElementById('pasteTextarea');
+  var pasteFilename  = document.getElementById('pasteFilename');
+  var pastePanel     = document.getElementById('pastePanel');
+  var pasteToggleBtn = document.getElementById('pasteToggleBtn');
+  if (!pasteTextarea) return;
+  var code = pasteTextarea.value;
+  if (!code.trim()) { pasteTextarea.focus(); return; }
+  var filename = (pasteFilename && pasteFilename.value.trim()) || generatePasteFilename(code);
+  if (!filename.includes('.')) {
+    var lang2 = detectLanguage(filename, code);
+    filename += lang2 === 'cobol' ? '.cbl' : lang2 === 'jcl' ? '.jcl' : '.txt';
+  }
+  var bytes = new TextEncoder().encode(code);
+  resetUI();
+  var dec = detectAndDecode(bytes.buffer);
+  ingestFile(filename, dec.text, dec.encoding, dec.warning, bytes.byteLength, true);
+  renderFileList();
+  pasteTextarea.value = '';
+  if (pasteFilename) pasteFilename.value = '';
+  if (pastePanel) pastePanel.style.display = 'none';
+  if (pasteToggleBtn) pasteToggleBtn.classList.remove('active');
+}
 </script>
 </body>
 </html>
