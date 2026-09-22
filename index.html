@@ -2046,14 +2046,17 @@ document.getElementById('fileInput')?.addEventListener('change', (e) => {
   }
 });
 
-var dz = document.getElementById('dropZone'); if (!dz) dz = {};
-dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
-dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
-dz.addEventListener('drop', e => {
-  e.preventDefault();
-  dz.classList.remove('drag-over');
-  if (e.dataTransfer.files.length) loadFilesIntoState([...e.dataTransfer.files]);
-});
+(function() {
+  var dz = document.getElementById('dropZone');
+  if (!dz) return;
+  dz.addEventListener('dragover', function(e) { e.preventDefault(); dz.classList.add('drag-over'); });
+  dz.addEventListener('dragleave', function() { dz.classList.remove('drag-over'); });
+  dz.addEventListener('drop', function(e) {
+    e.preventDefault();
+    dz.classList.remove('drag-over');
+    if (e.dataTransfer && e.dataTransfer.files.length) loadFilesIntoState([...e.dataTransfer.files]);
+  });
+})();
 
 // ── Coller du code directement ──────────────────────────────────
 
@@ -2902,7 +2905,6 @@ function runAnalysis() {
 }
 
 document.getElementById('parseBtn')?.addEventListener('click', runAnalysis);
-initPasteZone();
 initPasteZone();
 
 // ═══════════════════════════════════════════════════════════
