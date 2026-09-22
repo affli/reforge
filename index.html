@@ -1995,7 +1995,7 @@ function renderFileList() {
   const names  = Object.keys(loadedFiles);
   const infoEl = document.getElementById('fileInfo');
   const listEl = document.getElementById('fileListItems');
-  const pb     = document.getElementById('parseBtn');
+  const pb     = document.getElementById('parseBtn') || {classList:{add:function(){},remove:function(){}},textContent:'',style:{},disabled:false};
 
   if (!names.length) {
     infoEl.classList.remove('show');
@@ -2110,45 +2110,27 @@ function generatePasteFilename(text) {
 
 // ── Réinitialisation de l'UI entre deux analyses ───────────────
 function resetUI() {
-  document.getElementById('emptyMap').style.display = 'flex';
-  document.getElementById('mapContainer').style.display = 'none';
-  document.getElementById('mapContainer').innerHTML = '';
-  var _mt=document.getElementById('mapToolbar'); if(_mt) _mt.style.display='none';
-
-  document.getElementById('emptyPrograms').style.display = 'flex';
-  document.getElementById('programsContainer').style.display = 'none';
-  document.getElementById('programsContainer').innerHTML = '';
-
-  document.getElementById('emptyData').style.display = 'flex';
-  document.getElementById('dataContainer').style.display = 'none';
-  document.getElementById('dataContainer').innerHTML = '';
-
-  document.getElementById('emptyFlow').style.display = 'flex';
-  document.getElementById('flowContainer').style.display = 'none';
-  document.getElementById('flowContainer').innerHTML = '';
-
-  document.getElementById('emptySource').style.display = 'flex';
-  document.getElementById('sourceContainer').style.display = 'none';
-  document.getElementById('sourceHlCode').innerHTML = '';
-  document.getElementById('srcEncBadge').textContent = '';
-
-  document.getElementById('emptySummary').style.display = 'flex';
-  document.getElementById('summaryContainer').style.display = 'none';
-  document.getElementById('summaryContainer').innerHTML = '';
-
-  document.getElementById('emptyTranslate').style.display = 'flex';
-  document.getElementById('translateContainer').style.display = 'none';
-  const tStatus = document.getElementById('translateStatus');
-  const tOutput = document.getElementById('translateOutput');
-  if (tStatus) tStatus.style.display = 'none';
-  if (tOutput) tOutput.style.display = 'none';
-
-  document.getElementById('emptyDebug').style.display = 'flex';
-  document.getElementById('debugContainer').style.display = 'none';
-  document.getElementById('debugLog').innerHTML = '';
-
-  document.getElementById('statsGrid').style.display = 'none';
-  document.getElementById('statsGrid').innerHTML = '';
+  function _g(id) { return document.getElementById(id) || {style:{display:''},classList:{add:function(){},remove:function(){}},innerHTML:''}; }
+  _g('emptyMap').style.display = 'flex';
+  _g('mapContainer').style.display = 'none';
+  _g('mapContainer').innerHTML = '';
+  var mt = document.getElementById('mapToolbar'); if (mt) mt.style.display = 'none';
+  _g('emptyPrograms').style.display = 'flex';
+  _g('programsContainer').style.display = 'none';
+  _g('emptyData').style.display = 'flex';
+  _g('dataContainer').style.display = 'none';
+  _g('emptyFlow').style.display = 'flex';
+  _g('flowContainer').style.display = 'none';
+  _g('emptySource').style.display = 'flex';
+  _g('sourceHlContainer').style.display = 'none';
+  _g('emptyTranslate').style.display = 'flex';
+  _g('translateContainer').style.display = 'none';
+  _g('emptySummary').style.display = 'flex';
+  _g('summaryContainer').style.display = 'none';
+  _g('emptyDebug').style.display = 'flex';
+  _g('debugContainer').style.display = 'none';
+  _g('statsGrid').style.display = 'none';
+  _g('sourceArea').style.display = 'none';
 }
 
 function renderStatsGrid(entries) {
@@ -2821,8 +2803,7 @@ function runAnalysis() {
 
   resetUI();
   const parseBtn = document.getElementById('parseBtn');
-  parseBtn.disabled = true;
-  parseBtn.textContent = '⏳ Analyzing…';
+  if (parseBtn) { parseBtn.disabled = true; parseBtn.textContent = '⏳ Analyzing…'; }
 
   setTimeout(() => {
     try {
@@ -2909,7 +2890,7 @@ function runAnalysis() {
       parseBtn.style.border = '1px solid rgba(240,101,96,0.3)';
       console.error('Analysis error:', err);
     }
-    parseBtn.disabled = false;
+    if (parseBtn) parseBtn.disabled = false;
   }, 400);
 }
 
@@ -2941,8 +2922,6 @@ var _lastModel = null; // stocké après chaque analyse
 function initExports() {
   var tb = document.getElementById('mapToolbar');
   if (tb) tb.style.display = 'flex';
-  const bar = document.
-
   document.getElementById('exportSvgBtn')?.addEventListener('click', exportSVG);
   document.getElementById('exportJsonBtn')?.addEventListener('click', exportJSON);
   document.getElementById('exportCsvBtn')?.addEventListener('click', exportCSV);
