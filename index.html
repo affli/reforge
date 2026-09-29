@@ -12,6 +12,7 @@
 <meta property="og:description" content="Analyze JCL and COBOL mainframe files, interactive system map, AI-powered COBOL→Python translation. Free.">
 <meta property="og:type" content="website">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <!-- Google tag (gtag.js) -->
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-TMZLXLY7BC"></script>
 <script>
@@ -685,6 +686,27 @@
         <div class="section-title" style="margin-bottom:12px">Parsing log</div>
         <div id="debugLog" style="font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.9;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:16px;overflow-x:auto;overflow-y:auto;max-height:600px"></div>
       </div>
+    </div>
+
+    <div class="tab-content scrollbar-custom" id="tab-copybooks">
+      <div class="empty-state" id="emptyCopybooks"><div class="empty-icon">&#128203;</div><div class="empty-title">No copybooks detected</div><div class="empty-sub">Upload .CPY files alongside your COBOL programs</div></div>
+      <div id="copybooksContainer" style="display:none"></div>
+    </div>
+    <div class="tab-content scrollbar-custom" id="tab-db2">
+      <div class="empty-state" id="emptyDB2"><div class="empty-icon">&#128452;</div><div class="empty-title">No DB2 / SQL detected</div><div class="empty-sub">Upload COBOL with EXEC SQL ... END-EXEC statements</div></div>
+      <div id="db2Container" style="display:none"></div>
+    </div>
+    <div class="tab-content scrollbar-custom" id="tab-lineage">
+      <div class="empty-state" id="emptyLineage"><div class="empty-icon">&#128256;</div><div class="empty-title">No data lineage computed</div><div class="empty-sub">Run analysis to trace data flows across your system</div></div>
+      <div id="lineageContainer" style="display:none"></div>
+    </div>
+    <div class="tab-content scrollbar-custom" id="tab-impact">
+      <div class="empty-state" id="emptyImpact"><div class="empty-icon">&#128165;</div><div class="empty-title">Impact Analysis</div><div class="empty-sub">Run analysis then select any entity to see dependencies</div></div>
+      <div id="impactContainer" style="display:none"></div>
+    </div>
+    <div class="tab-content scrollbar-custom" id="tab-ai">
+      <div class="empty-state" id="emptyAI"><div class="empty-icon">&#10022;</div><div class="empty-title">AI System Explanation</div><div class="empty-sub">Run analysis to enable AI-powered system understanding</div></div>
+      <div id="aiContainer" style="display:none"></div>
     </div>
 
   </div><!-- right-panel -->
@@ -2131,6 +2153,11 @@ function resetUI() {
   _g('debugContainer').style.display = 'none';
   _g('statsGrid').style.display = 'none';
   _g('sourceArea').style.display = 'none';
+  _g('emptyCopybooks').style.display='flex'; _g('copybooksContainer').style.display='none';
+  _g('emptyDB2').style.display='flex'; _g('db2Container').style.display='none';
+  _g('emptyLineage').style.display='flex'; _g('lineageContainer').style.display='none';
+  _g('emptyImpact').style.display='flex'; _g('impactContainer').style.display='none';
+  _g('emptyAI').style.display='flex'; _g('aiContainer').style.display='none';
 }
 
 function renderStatsGrid(entries) {
@@ -2172,8 +2199,8 @@ function renderSystemMap(model) {
   emptyEl.style.display = 'none'; cont.style.display = 'block';
 
   const ECOL = { contains:'#2e3248',calls:'#a78bfa',performs:'#3dd68c',goes_to:'#f06560',reads:'#38bdf8',writes:'#f0b429' };
-  const KRANK = { job:0,step:1,program:2,paragraph:3,dataset:4,file:4 };
-  const KCOL  = { job:'#4e9bff',step:'#f0b429',program:'#a78bfa',paragraph:'#3dd68c',dataset:'#e06c75',file:'#38bdf8' };
+  const KRANK = { job:0,step:1,program:2,paragraph:3,dataset:4,file:4,copybook:2,field:3,db2_table:4,db2_column:4,vsam_dataset:4 };
+  const KCOL  = { job:'#4e9bff',step:'#f0b429',program:'#a78bfa',paragraph:'#3dd68c',dataset:'#e06c75',file:'#38bdf8',copybook:'#3dd68c',field:'#38bdf8',db2_table:'#4e9bff',db2_column:'#7a80a0',vsam_dataset:'#f0b429' };
   const RLBL  = { 0:'JOBS',1:'STEPS',2:'PROGRAMS',3:'PARAGRAPHS',4:'DATA' };
 
   const byRank={0:[],1:[],2:[],3:[],4:[]};
@@ -2797,6 +2824,445 @@ function renderPythonOutput(python, filename, mode) {
   };
 }
 
+// ================================================================
+//  REFORGE V2 — Copybooks · DB2 · VSAM · Lineage · Impact · AI
+// ================================================================
+var RESOLVE = {
+  PARSED:'Parsed', PARTIAL:'Partially parsed',
+  UNRESOLVED:'Unresolved', INFERRED:'Inferred', UNSUPPORTED:'Unsupported'
+};
+
+// ── 1. COPYBOOK PARSER
+function parseCopybook(text, filename) {
+  var name = (filename||'').replace(/\.[^.]+$/,'').toUpperCase();
+  var lines = text.replace(/\r/g,'').split('\n');
+  var fields = [], stack = [], nested = [];
+  for (var i=0; i<lines.length; i++) {
+    var raw = lines[i];
+    var col = raw.length >= 7 ? raw.substring(6) : raw;
+    col = col.replace(/\s*\*>.*$/, '').trim();
+    if (!col || col[0]==='*' || col[0]==='/') continue;
+    var cm = col.match(/^COPY\s+([\w-]+)/i);
+    if (cm) { nested.push({name:cm[1].toUpperCase(), resolved:false}); continue; }
+    var lm = col.match(/^(\d{1,2})\s+([\w-]+|FILLER)(.*)/i);
+    if (!lm) continue;
+    var level = parseInt(lm[1]), fn2 = lm[2].toUpperCase(), rest = lm[3]||'';
+    var fld = { level:level, name:fn2, pic:null, occurs:null, redefines:null, value:null, children:[] };
+    var pm = rest.match(/PIC(?:TURE)?\s+(?:IS\s+)?([\w9XVSABPZvs()+\-.,\/]+)/i);
+    if (pm) fld.pic = pm[1].toUpperCase();
+    var om = rest.match(/OCCURS\s+(\d+)(?:\s+TO\s+(\d+))?/i);
+    if (om) fld.occurs = { min:parseInt(om[1]), max:om[2]?parseInt(om[2]):parseInt(om[1]) };
+    var rm = rest.match(/REDEFINES\s+([\w-]+)/i);
+    if (rm) fld.redefines = rm[1].toUpperCase();
+    while (stack.length && stack[stack.length-1].level >= level) stack.pop();
+    if (stack.length) stack[stack.length-1].children.push(fld); else fields.push(fld);
+    stack.push(fld);
+  }
+  return { name:name, fields:fields, copyBooks:nested, status:RESOLVE.PARSED };
+}
+
+// ── 2. DB2 / EMBEDDED SQL PARSER
+function parseEmbeddedSQL(cobolText, programName) {
+  var stmts = [], re2 = /EXEC\s+SQL([\s\S]*?)END-EXEC/gi, m;
+  while ((m = re2.exec(cobolText)) !== null) {
+    var s = parseSQLStmt(m[1].replace(/\s+/g,' ').trim(), programName);
+    if (s) stmts.push(s);
+  }
+  return stmts;
+}
+
+function parseSQLStmt(sql, prog) {
+  var u = sql.toUpperCase().trim();
+  var s = { type:null, tables:[], columns:[], hostVars:[], operation:null, program:prog, status:RESOLVE.PARSED };
+  if (/^SELECT/.test(u))                      { s.type='SELECT';         s.operation='READ'; }
+  else if (/^INSERT/.test(u))                  { s.type='INSERT';         s.operation='WRITE'; }
+  else if (/^UPDATE/.test(u))                  { s.type='UPDATE';         s.operation='UPDATE'; }
+  else if (/^DELETE/.test(u))                  { s.type='DELETE';         s.operation='DELETE'; }
+  else if (/^MERGE/.test(u))                   { s.type='MERGE';          s.operation='UPDATE'; }
+  else if (/^DECLARE\s+\w+\s+CURSOR/.test(u)) { s.type='DECLARE_CURSOR'; s.operation='READ'; }
+  else if (/^OPEN/.test(u))                    { s.type='OPEN';           s.operation='READ'; }
+  else if (/^FETCH/.test(u))                   { s.type='FETCH';          s.operation='READ'; }
+  else if (/^CLOSE/.test(u))                   { s.type='CLOSE';          s.operation='READ'; }
+  else { s.status = RESOLVE.UNSUPPORTED; return s; }
+  var fm = u.match(/FROM\s+([\w.]+(?:\s*,\s*[\w.]+)*)/);
+  if (fm) s.tables = fm[1].split(',').map(function(t){return t.trim();});
+  var im = u.match(/^(?:UPDATE|INSERT\s+INTO|DELETE\s+FROM|MERGE\s+INTO)\s+([\w.]+)/);
+  if (im && !s.tables.length) s.tables = [im[1].trim()];
+  var cr = u.match(/CURSOR\s+FOR\s+SELECT[\s\S]+?FROM\s+([\w.]+)/);
+  if (cr && !s.tables.length) s.tables = [cr[1].trim()];
+  var hre = /:([A-Z][\w-]*)/g, hm;
+  while ((hm = hre.exec(u)) !== null) s.hostVars.push(hm[1]);
+  var sm = sql.match(/SELECT\s+([\s\S]+?)\s+(?:INTO|FROM)\s+/i);
+  if (sm) s.columns = sm[1].split(',').map(function(c){return c.trim().split(/\s+AS\s+/i)[0].trim();}).filter(function(c){return c!=='*';});
+  return s;
+}
+
+// ── 3. VSAM DETECTOR
+function detectVSAMOps(cobolText, files) {
+  var ops = [], lines = cobolText.replace(/\r/g,'').split('\n');
+  var fnames = (files||[]).map(function(f){return f.fileName;});
+  for (var i=0; i<lines.length; i++) {
+    var l = lines[i].replace(/\s+/g,' ').trim().toUpperCase();
+    var m = l.match(/^(READ|WRITE|REWRITE|DELETE|START)\s+([\w-]+)/);
+    if (!m || fnames.indexOf(m[2])===-1) continue;
+    var fi = (files||[]).find(function(f){return f.fileName===m[2];});
+    ops.push({ operation:m[1], fileName:m[2], assignTo:fi?fi.assignTo:null, organization:fi?fi.organization:null });
+  }
+  return ops;
+}
+
+function isVSAMDataset(dsn, org) {
+  var u = (dsn||'').toUpperCase();
+  return u.includes('.VSAM.')||u.endsWith('.KSDS')||u.endsWith('.ESDS')||u.endsWith('.RRDS')||/INDEXED|RELATIVE/.test((org||'').toUpperCase());
+}
+
+// ── 4. RESOLVE COPYBOOKS
+function resolveCopybooks() {
+  var idx = {};
+  for (var fn in loadedFiles) {
+    var ext = fn.split('.').pop().toUpperCase();
+    if (ext==='CPY'||ext==='COPY') { idx[fn.replace(/\.[^.]+$/,'').toUpperCase()] = fn; }
+  }
+  for (var fn2 in loadedFiles) {
+    var f = loadedFiles[fn2];
+    if (f.language!=='cobol'||!f.parsed) continue;
+    for (var i=0; i<(f.parsed.copyBooks||[]).length; i++) {
+      var cb = f.parsed.copyBooks[i];
+      var k = cb.name.toUpperCase();
+      if (idx[k]) {
+        cb.resolved=true; cb.resolvedFile=idx[k];
+        var cbf = loadedFiles[idx[k]];
+        if (!cbf.parsedCopybook) { cbf.parsedCopybook=parseCopybook(cbf.rawText||cbf.content||'',k); cbf.language='copybook'; }
+        cb.fields = cbf.parsedCopybook.fields;
+      } else { cb.resolved=false; cb.resolvedFile=null; cb.fields=[]; }
+    }
+  }
+}
+
+// ── 5. EXTENDED COBOL PARSER (wraps existing parseCOBOL)
+function parseCOBOLV2(text, filename) {
+  var r = parseCOBOL(text, filename);
+  r.sqlStatements = parseEmbeddedSQL(text, r.programName);
+  r.vsamOps = detectVSAMOps(text, r.files);
+  var stack=[];
+  for (var i=0; i<(r.wsItems||[]).length; i++) {
+    var w=r.wsItems[i];
+    while (stack.length && stack[stack.length-1].level >= w.level) stack.pop();
+    w.parentName = stack.length ? stack[stack.length-1].name : null;
+    stack.push(w);
+  }
+  return r;
+}
+
+// ── 6. EXTENDED SYSTEM MODEL
+function buildSystemModelV2() {
+  resolveCopybooks();
+      var model = buildSystemModelV2();
+      window._v2Model = model;
+  if (!model.nodeIndex) { model.nodeIndex={}; model.nodes.forEach(function(n){model.nodeIndex[n.id]=n;}); }
+  function addN(n) { if (!model.nodeIndex[n.id]){model.nodes.push(n);model.nodeIndex[n.id]=n;} }
+  function addE(from,to,kind,label,status) { if(from&&to) model.edges.push({from:from,to:to,kind:kind||'relates',label:label||'',status:status||RESOLVE.PARSED}); }
+
+  for (var fn in loadedFiles) {
+    var f = loadedFiles[fn];
+    if (f.language==='copybook' && f.parsedCopybook) {
+      var cb2=f.parsedCopybook, cid='copybook:'+cb2.name;
+      addN({id:cid,kind:'copybook',language:'copybook',label:cb2.name,sourceFile:fn,meta:{fieldCount:cb2.fields.length,status:RESOLVE.PARSED}});
+      for (var i=0; i<cb2.fields.length; i++) {
+        var fld=cb2.fields[i], fid='field:'+cb2.name+':'+fld.name;
+        addN({id:fid,kind:'field',language:'copybook',label:fld.name,sourceFile:fn,meta:{level:fld.level,pic:fld.pic,occurs:fld.occurs,parentCopybook:cb2.name}});
+        addE(cid,fid,'contains','');
+      }
+    }
+    if (f.language!=='cobol'||!f.parsed) continue;
+    var prog=f.parsed, pid='cobol:program:'+prog.programName;
+    for (var j=0; j<(prog.copyBooks||[]).length; j++) {
+      var cbr=prog.copyBooks[j], cbid='copybook:'+cbr.name;
+      if (!model.nodeIndex[cbid]) addN({id:cbid,kind:'copybook',language:'copybook',label:cbr.name,sourceFile:fn,meta:{status:cbr.resolved?RESOLVE.PARSED:RESOLVE.UNRESOLVED,resolved:!!cbr.resolved}});
+      addE(pid,cbid,'uses','COPY',cbr.resolved?RESOLVE.PARSED:RESOLVE.UNRESOLVED);
+    }
+    for (var k2=0; k2<(prog.sqlStatements||[]).length; k2++) {
+      var sql=prog.sqlStatements[k2];
+      for (var t=0; t<sql.tables.length; t++) {
+        var tbl=sql.tables[t], tid='db2:'+tbl;
+        addN({id:tid,kind:'db2_table',language:'db2',label:tbl,sourceFile:fn,meta:{status:RESOLVE.PARSED}});
+        addE(pid,tid,sql.operation==='READ'?'reads':'writes',sql.type);
+        for (var c=0; c<sql.columns.length; c++) {
+          var col=sql.columns[c], colid='db2:'+tbl+':'+col;
+          addN({id:colid,kind:'db2_column',language:'db2',label:col,sourceFile:fn,meta:{table:tbl}});
+          addE(tid,colid,'contains','');
+        }
+      }
+    }
+    for (var v=0; v<(prog.vsamOps||[]).length; v++) {
+      var vop=prog.vsamOps[v], dsn=vop.assignTo||vop.fileName||'UNKNOWN', vid='vsam:'+dsn;
+      addN({id:vid,kind:isVSAMDataset(dsn,vop.organization)?'vsam_dataset':'dataset',language:'jcl',label:dsn,sourceFile:fn,meta:{organization:vop.organization}});
+      addE(pid,vid,(vop.operation==='READ'||vop.operation==='START')?'reads':'writes',vop.operation);
+    }
+  }
+  model.lineage = buildLineageV2(model);
+  return model;
+}
+
+// ── 7. DATA LINEAGE
+function buildLineageV2(model) {
+  var L={nodes:{},edges:[]};
+  function ln(id,label,kind,src,status){if(!L.nodes[id])L.nodes[id]={id:id,label:label,kind:kind,sourceFile:src||'',status:status||RESOLVE.PARSED};}
+  function le(from,to,kind,label,status){L.edges.push({from:from,to:to,kind:kind||'flows',label:label||'',status:status||RESOLVE.PARSED});}
+  for (var fn in loadedFiles) {
+    var f=loadedFiles[fn]; if(f.language!=='cobol'||!f.parsed) continue;
+    var prog=f.parsed, pn=prog.programName;
+    for (var i=0; i<(prog.sqlStatements||[]).length; i++) {
+      var sql=prog.sqlStatements[i];
+      for (var t=0; t<sql.tables.length; t++) {
+        var tbl=sql.tables[t];
+        ln('db2:'+tbl,tbl,'db2_table',fn);
+        for (var c=0; c<sql.columns.length; c++) { ln('db2:'+tbl+':'+sql.columns[c],sql.columns[c],'db2_column',fn); le('db2:'+tbl,'db2:'+tbl+':'+sql.columns[c],'contains',''); }
+        for (var h=0; h<sql.hostVars.length; h++) {
+          var hvid='ws:'+pn+':'+sql.hostVars[h]; ln(hvid,sql.hostVars[h],'ws_field',fn);
+          if (sql.operation==='READ') { for (var c2=0; c2<sql.columns.length; c2++) le('db2:'+tbl+':'+sql.columns[c2],hvid,'flows',sql.type,RESOLVE.INFERRED); }
+          else le(hvid,'db2:'+tbl,'flows',sql.type,RESOLVE.INFERRED);
+        }
+      }
+    }
+    for (var v=0; v<(prog.vsamOps||[]).length; v++) {
+      var vop=prog.vsamOps[v], dsn=vop.assignTo||vop.fileName||'?', vid='vsam:'+dsn, pr='prog:'+pn;
+      ln(vid,dsn,'vsam_dataset',fn); ln(pr,pn,'program',fn);
+      if(vop.operation==='READ') le(vid,pr,'flows','READ'); else le(pr,vid,'flows',vop.operation);
+    }
+    for (var j=0; j<(prog.copyBooks||[]).length; j++) {
+      var cbr=prog.copyBooks[j], cbid='cb:'+cbr.name;
+      ln(cbid,cbr.name,'copybook',fn,cbr.resolved?RESOLVE.PARSED:RESOLVE.UNRESOLVED);
+      ln('prog:'+pn,pn,'program',fn); le('prog:'+pn,cbid,'uses','COPY',cbr.resolved?RESOLVE.PARSED:RESOLVE.UNRESOLVED);
+    }
+  }
+  return L;
+}
+
+// ── 8. IMPACT ANALYSIS
+function computeImpact(entityId, model, lineage) {
+  var allNodes={};
+  model.nodes.forEach(function(n){allNodes[n.id]=n;});
+  if(lineage&&lineage.nodes) Object.values(lineage.nodes).forEach(function(n){allNodes[n.id]=n;});
+  var allEdges=model.edges.concat((lineage&&lineage.edges)||[]);
+  var direct=[],indirect=[],visited=new Set([entityId]),queue=[entityId],level=0;
+  while(queue.length&&level<8){
+    var next=[];
+    for(var qi=0;qi<queue.length;qi++){var nid=queue[qi];for(var ei=0;ei<allEdges.length;ei++){var e=allEdges[ei];if(e.to===nid&&!visited.has(e.from)){visited.add(e.from);var node=allNodes[e.from];if(node)(level===0?direct:indirect).push({node:node,via:e});next.push(e.from);}}}
+    queue=next;level++;
+  }
+  var all=direct.concat(indirect);
+  return { entityId:entityId, entity:allNodes[entityId], direct:direct, indirect:indirect,
+    programs:all.filter(function(i){return i.node.kind==='program';}),
+    jobs:all.filter(function(i){return i.node.kind==='job';}),
+    datasets:all.filter(function(i){return ['dataset','vsam_dataset'].includes(i.node.kind);}),
+    confirmed:direct.filter(function(d){return d.via.status!==RESOLVE.INFERRED;}).length,
+    inferred:direct.filter(function(d){return d.via.status===RESOLVE.INFERRED;}).length };
+}
+
+// ── 9. AI EXPLAIN
+function buildAICtx(model) {
+  var lines=[],ni=model.nodeIndex||{};
+  var byK=function(k){return model.nodes.filter(function(n){return n.kind===k;});};
+  var progs=byK('program'),jobs=byK('job'),db2=byK('db2_table'),cbs=byK('copybook'),vsam=byK('vsam_dataset');
+  if(progs.length) lines.push('PROGRAMS ('+progs.length+'): '+progs.map(function(n){return n.label;}).join(', '));
+  if(jobs.length)  lines.push('JOBS: '+jobs.map(function(n){return n.label;}).join(', '));
+  if(db2.length)   lines.push('DB2 TABLES: '+db2.map(function(n){return n.label;}).join(', '));
+  if(cbs.length)   lines.push('COPYBOOKS: '+cbs.map(function(n){return n.label+(n.meta&&n.meta.status===RESOLVE.UNRESOLVED?' [UNRESOLVED]':'');}).join(', '));
+  if(vsam.length)  lines.push('VSAM: '+vsam.map(function(n){return n.label;}).join(', '));
+  var writes=model.edges.filter(function(e){return e.kind==='writes';}).slice(0,8);
+  var reads=model.edges.filter(function(e){return e.kind==='reads';}).slice(0,8);
+  if(writes.length) lines.push('WRITES: '+writes.map(function(e){return (ni[e.from]||{label:e.from}).label+' -> '+(ni[e.to]||{label:e.to}).label;}).join(', '));
+  if(reads.length)  lines.push('READS: '+reads.map(function(e){return (ni[e.from]||{label:e.from}).label+' <- '+(ni[e.to]||{label:e.to}).label;}).join(', '));
+  return lines.join('\n');
+}
+
+async function aiExplain(question, model) {
+  var apiKey=getApiKey();
+  var sEl=document.getElementById('aiExplainStatus'),oEl=document.getElementById('aiExplainOutput');
+  if(!sEl||!oEl) return;
+  sEl.style.display='block'; sEl.innerHTML='<span style="color:var(--text3)">Analyzing system...</span>'; oEl.style.display='none';
+  if(!apiKey){sEl.innerHTML='<span style="color:var(--yellow)">Add your Anthropic API key in the Python tab first.</span>';return;}
+  try {
+    var resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+      headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:2048,
+        system:'You are Reforge AI, a mainframe modernization expert.\nSystem context:\n'+buildAICtx(model)+'\n\nRULES:\n- Distinguish CONFIRMED (from source) vs INFERRED (from dependencies) vs AI INTERPRETATION\n- Never invent business logic not in the context\n- Be concise and technical',
+        messages:[{role:'user',content:question}]})});
+    var data=await resp.json();
+    var text=(data.content||[]).map(function(b){return b.text||'';}).join('').trim();
+    oEl.innerHTML='<div style="font-family:IBM Plex Sans,sans-serif;font-size:12px;line-height:1.75;color:var(--text);white-space:pre-wrap">'+escV2(text)+'</div>';
+    oEl.style.display='block'; sEl.style.display='none';
+  } catch(e2){sEl.innerHTML='<span style="color:var(--red)">Error: '+escV2(e2.message)+'</span>';}
+}
+
+function escV2(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function doAIExplain(){var q=document.getElementById('aiQ');if(q&&q.value.trim())aiExplain(q.value.trim(),window._v2Model||{nodes:[],edges:[],nodeIndex:{}});}
+
+// ── 10. V2 RENDER FUNCTIONS
+function renderCopybooksTab(model) {
+  var empty=document.getElementById('emptyCopybooks'),cont=document.getElementById('copybooksContainer');
+  if(!empty||!cont) return;
+  var cbs=model?model.nodes.filter(function(n){return n.kind==='copybook';}):[];
+  if(!cbs.length){empty.style.display='flex';cont.style.display='none';return;}
+  empty.style.display='none';cont.style.display='block';
+  var html='',ni=model.nodeIndex||{};
+  cbs.forEach(function(cb){
+    var resolved=!(cb.meta&&cb.meta.status===RESOLVE.UNRESOLVED);
+    var fields=model.nodes.filter(function(n){return n.kind==='field'&&n.id.indexOf('field:'+cb.label+':')===0;});
+    var usedBy=model.edges.filter(function(e){return e.to===cb.id&&e.kind==='uses';}).map(function(e){return (ni[e.from]||{label:e.from.split(':').pop()}).label;});
+    html+='<div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;margin-bottom:14px;overflow:hidden">';
+    html+='<div style="background:var(--bg3);border-bottom:1px solid var(--border);padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
+    html+='<span style="font-family:IBM Plex Mono,monospace;font-size:13px;color:var(--cyan);font-weight:600">'+escV2(cb.label)+'.CPY</span>';
+    html+=resolved
+      ?'<span style="font-size:9px;padding:1px 6px;background:rgba(61,214,140,.1);border:1px solid rgba(61,214,140,.3);border-radius:3px;color:var(--green)">Resolved</span>'
+      :'<span style="font-size:9px;padding:1px 6px;background:rgba(240,180,41,.1);border:1px solid rgba(240,180,41,.3);border-radius:3px;color:var(--yellow)">Unresolved</span>';
+    if(usedBy.length) html+='<span style="font-size:10px;color:var(--text3)">Used by: '+escV2(usedBy.join(', '))+'</span>';
+    html+='</div>';
+    if(fields.length){
+      html+='<div style="padding:12px 16px"><div style="font-size:10px;color:var(--text3);font-family:IBM Plex Mono,monospace;margin-bottom:8px">'+fields.length+' field(s)</div><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px">';
+      fields.forEach(function(fn3){html+='<div style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:6px 10px"><div style="font-family:IBM Plex Mono,monospace;font-size:10px;color:var(--green)">'+escV2(fn3.label)+'</div>'+(fn3.meta&&fn3.meta.pic?'<div style="font-size:9px;color:var(--text3)">PIC '+escV2(fn3.meta.pic)+'</div>':'')+'</div>';});
+      html+='</div></div>';
+    } else if(!resolved) html+='<div style="padding:12px 16px;font-size:11px;color:var(--text3)">Upload the .CPY file to resolve fields.</div>';
+    html+='</div>';
+  });
+  cont.innerHTML=html;
+}
+
+function renderDB2Tab(model) {
+  var empty=document.getElementById('emptyDB2'),cont=document.getElementById('db2Container');
+  if(!empty||!cont) return;
+  var tbls=model?model.nodes.filter(function(n){return n.kind==='db2_table';}):[];
+  if(!tbls.length){empty.style.display='flex';cont.style.display='none';return;}
+  empty.style.display='none';cont.style.display='block';
+  var ni=model.nodeIndex||{}, html='';
+  tbls.forEach(function(tbl){
+    var cols=model.nodes.filter(function(n){return n.kind==='db2_column'&&n.meta&&n.meta.table===tbl.label;});
+    var readBy=model.edges.filter(function(e){return e.to===tbl.id&&e.kind==='reads';}).map(function(e){return (ni[e.from]||{label:e.from.split(':').pop()}).label;});
+    var writeBy=model.edges.filter(function(e){return e.to===tbl.id&&e.kind==='writes';}).map(function(e){return (ni[e.from]||{label:e.from.split(':').pop()}).label;});
+    html+='<div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;overflow:hidden">';
+    html+='<div style="background:var(--bg3);border-bottom:1px solid var(--border);padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
+    html+='<span style="font-family:IBM Plex Mono,monospace;font-size:10px;color:var(--text3)">DB2.</span><span style="font-family:IBM Plex Mono,monospace;font-size:13px;color:var(--accent);font-weight:600">'+escV2(tbl.label)+'</span>';
+    if(readBy.length) html+='<span style="font-size:10px;color:var(--green)">READ by: '+escV2(readBy.join(', '))+'</span>';
+    if(writeBy.length) html+='<span style="font-size:10px;color:var(--yellow)">WRITE by: '+escV2(writeBy.join(', '))+'</span>';
+    html+='</div>';
+    if(cols.length){html+='<div style="padding:10px 16px;display:flex;flex-wrap:wrap;gap:6px">';cols.forEach(function(col){html+='<span style="font-family:IBM Plex Mono,monospace;font-size:10px;padding:3px 8px;background:rgba(78,155,255,.08);border:1px solid rgba(78,155,255,.2);border-radius:3px;color:var(--accent)">'+escV2(col.label)+'</span>';});html+='</div>';}
+    html+='</div>';
+  });
+  cont.innerHTML=html;
+}
+
+function renderLineageTab(model) {
+  var empty=document.getElementById('emptyLineage'),cont=document.getElementById('lineageContainer');
+  if(!empty||!cont) return;
+  var L=model&&model.lineage;
+  if(!L||!Object.keys(L.nodes).length){empty.style.display='flex';cont.style.display='none';return;}
+  empty.style.display='none';cont.style.display='block';
+  var nodes=Object.values(L.nodes);
+  var KC={db2_table:'#4e9bff',db2_column:'#38bdf8',ws_field:'#a78bfa',vsam_dataset:'#f0b429',copybook:'#3dd68c',program:'#4e9bff'};
+  var KL={db2_table:'DB2 Tables',db2_column:'DB2 Columns',ws_field:'Working-Storage',vsam_dataset:'VSAM Datasets',copybook:'Copybooks',program:'Programs'};
+  var byKind={};
+  nodes.forEach(function(n){(byKind[n.kind]=byKind[n.kind]||[]).push(n);});
+  var html='';
+  Object.keys(byKind).forEach(function(k){
+    var col=KC[k]||'#7a80a0';
+    html+='<div style="margin-bottom:20px"><div class="section-title">'+escV2(KL[k]||k)+'</div><div style="display:flex;flex-wrap:wrap;gap:8px">';
+    byKind[k].forEach(function(node){
+      var out=L.edges.filter(function(e){return e.from===node.id;}).length;
+      var inn=L.edges.filter(function(e){return e.to===node.id;}).length;
+      var inf=node.status===RESOLVE.UNRESOLVED||node.status===RESOLVE.INFERRED;
+      html+='<div onclick="showImpactFor(\''+escV2(node.id)+'\')" style="background:var(--bg3);border:1px solid '+col+'44;border-radius:6px;padding:8px 12px;cursor:pointer;transition:border-color .15s" onmouseover="this.style.borderColor=\''+col+'\'" onmouseout="this.style.borderColor=\''+col+'44\'">'
+        +'<div style="font-family:IBM Plex Mono,monospace;font-size:11px;color:'+col+'">'+escV2(node.label)+'</div>'
+        +'<div style="font-size:10px;color:var(--text3)">out:'+out+' in:'+inn+(inf?' <span style="color:var(--yellow)">['+node.status+']</span>':'')+'</div>'
+        +'</div>';
+    });
+    html+='</div></div>';
+  });
+  if(L.edges.length){
+    html+='<div class="section-title">Data Flows</div><div style="display:flex;flex-direction:column;gap:4px">';
+    L.edges.slice(0,25).forEach(function(e){
+      var fn3=L.nodes[e.from],tn=L.nodes[e.to];
+      var fl=fn3?fn3.label:e.from.split(':').pop(),tl=tn?tn.label:e.to.split(':').pop();
+      var inf=e.status===RESOLVE.INFERRED;
+      html+='<div style="font-family:IBM Plex Mono,monospace;font-size:10px;color:var(--text2);padding:3px 10px;background:var(--bg3);border-radius:4px;display:flex;align-items:center;gap:6px">'
+        +'<span style="color:'+(inf?'var(--yellow)':'var(--green)')+'">'+escV2(fl)+'</span>'
+        +' <span style="color:var(--text3)">['+escV2(e.label||e.kind)+']</span> '
+        +'<span style="color:'+(inf?'var(--yellow)':'var(--green)')+'">'+escV2(tl)+'</span>'
+        +(inf?' <span style="font-size:9px;color:var(--yellow)">(inferred)</span>':'')+'</div>';
+    });
+    if(L.edges.length>25) html+='<div style="color:var(--text3);font-size:10px;padding:4px 10px">...and '+(L.edges.length-25)+' more</div>';
+    html+='</div>';
+  }
+  html+='<div id="lineageDetail"></div>';
+  cont.innerHTML=html;
+}
+
+function showImpactFor(nodeId) {
+  var model=window._v2Model; if(!model) return;
+  var impact=computeImpact(nodeId,model,model.lineage||{nodes:{},edges:[]});
+  var el=document.getElementById('lineageDetail')||document.getElementById('impactResult');
+  if(!el||!impact.entity) return;
+  function sl(s){return s===RESOLVE.INFERRED?' <span style="color:var(--yellow);font-size:9px">(inferred)</span>':' <span style="color:var(--green);font-size:9px">(confirmed)</span>';}
+  el.innerHTML='<div style="background:var(--bg2);border:1px solid var(--accent)44;border-radius:8px;padding:14px;margin-top:16px">'
+    +'<div style="font-family:IBM Plex Mono,monospace;font-size:13px;color:var(--accent);margin-bottom:10px">'+escV2(impact.entity.label)+' <span style="font-size:10px;color:var(--text3)">('+impact.entity.kind+')</span></div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Direct: <b>'+impact.direct.length+'</b> &nbsp; Indirect: <b>'+impact.indirect.length+'</b></div>'
+    +(impact.programs.length?'<div style="font-size:10px;color:var(--purple);margin-bottom:4px">Programs: '+impact.programs.map(function(i){return escV2(i.node.label)+sl(i.via.status);}).join(', ')+'</div>':'')
+    +(impact.jobs.length?'<div style="font-size:10px;color:var(--accent);margin-bottom:4px">Jobs: '+impact.jobs.map(function(i){return escV2(i.node.label);}).join(', ')+'</div>':'')
+    +(impact.datasets.length?'<div style="font-size:10px;color:var(--yellow);margin-bottom:4px">Datasets: '+impact.datasets.map(function(i){return escV2(i.node.label);}).join(', ')+'</div>':'')
+    +'</div>';
+}
+
+function renderImpactTab(model) {
+  var empty=document.getElementById('emptyImpact'),cont=document.getElementById('impactContainer');
+  if(!empty||!cont) return;
+  if(!model||!model.nodes.length){empty.style.display='flex';cont.style.display='none';return;}
+  empty.style.display='none';cont.style.display='block';
+  var entities=model.nodes.filter(function(n){return ['program','copybook','db2_table','db2_column','vsam_dataset','dataset','job'].includes(n.kind);});
+  cont.innerHTML='<div style="display:flex;gap:10px;align-items:center;margin-bottom:16px;flex-wrap:wrap">'
+    +'<div class="section-title" style="margin:0;flex:1">Impact Analysis</div>'
+    +'<select id="impactSel" style="font-family:IBM Plex Mono,monospace;font-size:10px;background:var(--bg3);color:var(--text2);border:1px solid var(--border);border-radius:4px;padding:5px 10px">'
+    +'<option value="">-- Select entity --</option>'
+    +entities.map(function(n){return '<option value="'+escV2(n.id)+'">'+escV2(n.label)+' ('+n.kind+')</option>';}).join('')
+    +'</select>'
+    +'<button onclick="runImpact()" style="padding:7px 14px;background:var(--accent2);border:none;border-radius:6px;color:#fff;font-family:IBM Plex Mono,monospace;font-size:11px;cursor:pointer">Analyze</button>'
+    +'</div><div id="impactResult"></div>';
+}
+
+function runImpact() {
+  var sel=document.getElementById('impactSel'); if(!sel||!sel.value) return;
+  var model=window._v2Model; if(!model) return;
+  var impact=computeImpact(sel.value,model,model.lineage||{nodes:{},edges:[]});
+  var res=document.getElementById('impactResult'); if(!res||!impact.entity) return;
+  function sl2(s){return s===RESOLVE.INFERRED?' <span style="font-size:9px;color:var(--yellow)">(inferred)</span>':' <span style="font-size:9px;color:var(--green)">(confirmed)</span>';}
+  function badge(i){return '<div style="padding:5px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;margin-bottom:4px;font-family:IBM Plex Mono,monospace;font-size:10px">'+escV2(i.node.label)+' <span style="color:var(--text3)">('+i.node.kind+')</span>'+sl2(i.via.status)+'</div>';}
+  res.innerHTML='<div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px">'
+    +'<div style="font-family:IBM Plex Mono,monospace;font-size:14px;font-weight:600;color:var(--accent);margin-bottom:16px">'+escV2(impact.entity.label)+' <span style="font-size:10px;color:var(--text3)">('+impact.entity.kind+')</span></div>'
+    +'<div class="section-title">Direct ('+impact.direct.length+')</div>'+(impact.direct.length?impact.direct.map(badge).join(''):'<div style="color:var(--text3);font-size:11px;padding:8px 0">None</div>')
+    +'<div class="section-title" style="margin-top:14px">Indirect ('+impact.indirect.length+')</div>'+(impact.indirect.slice(0,15).map(badge).join('')||'<div style="color:var(--text3);font-size:11px;padding:8px 0">None</div>')
+    +(impact.programs.length?'<div class="section-title" style="margin-top:14px">Programs</div>'+impact.programs.map(badge).join(''):'')
+    +(impact.jobs.length?'<div class="section-title" style="margin-top:14px">Jobs</div>'+impact.jobs.map(badge).join(''):'')
+    +(impact.datasets.length?'<div class="section-title" style="margin-top:14px">Datasets / VSAM</div>'+impact.datasets.map(badge).join(''):'')
+    +'</div>';
+}
+
+function renderAITab(model) {
+  var empty=document.getElementById('emptyAI'),cont=document.getElementById('aiContainer');
+  if(!empty||!cont) return;
+  if(!model||!model.nodes.length){empty.style.display='flex';cont.style.display='none';return;}
+  empty.style.display='none';cont.style.display='block';
+  var sugg=['What does this system do?','Which programs update DB2 tables?','What would break if I change a copybook?','Explain the data flow in this system.','Which jobs depend on VSAM datasets?','Summarize this system in business terms.'];
+  cont.innerHTML='<div class="section-title">AI System Explanation</div>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">'
+    +sugg.map(function(s){return '<button onclick="document.getElementById(\'aiQ\').value=\''+escV2(s)+'\'" style="padding:4px 10px;background:var(--bg3);border:1px solid var(--border2);border-radius:4px;color:var(--text2);font-family:IBM Plex Mono,monospace;font-size:10px;cursor:pointer">'+escV2(s)+'</button>';}).join('')
+    +'</div>'
+    +'<div style="display:flex;gap:8px;margin-bottom:10px">'
+    +'<input id="aiQ" placeholder="Ask about this system..." style="flex:1;font-family:IBM Plex Mono,monospace;font-size:11px;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);outline:none" onfocus="this.style.borderColor=\'var(--accent)\'" onblur="this.style.borderColor=\'var(--border)\'" onkeydown="if(event.key===\'Enter\')doAIExplain()">'
+    +'<button onclick="doAIExplain()" style="padding:8px 16px;background:var(--purple);border:none;border-radius:6px;color:#fff;font-family:IBM Plex Mono,monospace;font-size:11px;font-weight:600;cursor:pointer">Ask AI</button>'
+    +'</div>'
+    +'<div id="aiExplainStatus" style="display:none;font-family:IBM Plex Mono,monospace;font-size:11px;padding:10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;margin-bottom:8px"></div>'
+    +'<div id="aiExplainOutput" style="display:none;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:14px"></div>';
+}
+
 function runAnalysis() {
   const names = Object.keys(loadedFiles);
   if (!names.length) return;
@@ -2876,7 +3342,17 @@ function runAnalysis() {
       if (typeof renderFlowTab === 'function') renderFlowTab(model);
       if (typeof renderSourceTab === 'function') renderSourceTab();
       if (typeof renderTranslateTab === 'function') renderTranslateTab();
-      if (typeof renderSummaryTab === 'function') renderSummaryTab(model, { jclCount, cobolCount, unknownCount });
+      if (typeof renderCopybooksTab === 'function') renderCopybooksTab(model);
+        if (typeof renderDB2Tab === 'function') renderDB2Tab(model);
+        if (typeof renderLineageTab === 'function') renderLineageTab(model);
+        if (typeof renderImpactTab === 'function') renderImpactTab(model);
+        if (typeof renderAITab === 'function') renderAITab(model);
+        if (typeof renderCopybooksTab === 'function') renderCopybooksTab(model);
+        if (typeof renderDB2Tab === 'function') renderDB2Tab(model);
+        if (typeof renderLineageTab === 'function') renderLineageTab(model);
+        if (typeof renderImpactTab === 'function') renderImpactTab(model);
+        if (typeof renderAITab === 'function') renderAITab(model);
+        if (typeof renderSummaryTab === 'function') renderSummaryTab(model, { jclCount, cobolCount, unknownCount });
 
       const nf = names.length;
       parseBtn.textContent = `✓ ${nf} fichier${nf>1?'s analysés':' analysé'} · ${model.nodes.length} nœuds · ${model.edges.length} liens`;
