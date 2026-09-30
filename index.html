@@ -12,7 +12,6 @@
 <meta property="og:description" content="Analyze JCL and COBOL mainframe files, interactive system map, AI-powered COBOL→Python translation. Free.">
 <meta property="og:type" content="website">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <!-- Google tag (gtag.js) -->
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-TMZLXLY7BC"></script>
 <script>
@@ -523,6 +522,11 @@
       <div class="tab" data-tab="translate" style="color:var(--purple)">⚡ Python</div>
       <div class="tab" data-tab="summary">Summary</div>
       <div class="tab" data-tab="debug" style="color:var(--red)">Debug</div>
+      <div class="tab" data-tab="copybooks">Copybooks</div>
+      <div class="tab" data-tab="db2">DB2 / SQL</div>
+      <div class="tab" data-tab="lineage">Data Lineage</div>
+      <div class="tab" data-tab="impact">Impact</div>
+      <div class="tab" data-tab="ai">AI Explain</div>
     </div>
 
     <div class="tab-content active scrollbar-custom" id="tab-map">
@@ -3552,6 +3556,33 @@ function addPastedCode() {
   if (pastePanel) pastePanel.style.display = 'none';
   if (pasteToggleBtn) pasteToggleBtn.classList.remove('active');
 }
+
+// ── Map filters (data-mapfilter) ─────────────────────────────────
+(function() {
+  document.addEventListener('click', function(e) {
+    var btn = e.target.closest('[data-mapfilter]');
+    if (!btn) return;
+    var filter = btn.dataset.mapfilter;
+    // Update active state
+    document.querySelectorAll('[data-mapfilter]').forEach(function(b) { b.classList.remove('active'); });
+    btn.classList.add('active');
+    // Filter nodes in system map
+    var model = window._v2Model || window._lastModel;
+    if (!model) return;
+    var KINDS_ALL = null;
+    var kindMap = { all:null, job:'job', step:'step', program:'program', paragraph:'paragraph',
+                    dataset:'dataset', copybook:'copybook', db2:'db2_table', vsam:'vsam_dataset' };
+    var filterKind = kindMap[filter] || null;
+    // Re-render map with filter
+    var cont = document.getElementById('mapContainer');
+    if (!cont) return;
+    // Show/hide SVG nodes by kind
+    var svgNodes = cont.querySelectorAll('g[data-kind]');
+    svgNodes.forEach(function(g) {
+      g.style.display = (!filterKind || g.dataset.kind === filterKind) ? '' : 'none';
+    });
+  });
+})();
 </script>
 </body>
 </html>
