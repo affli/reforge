@@ -2798,9 +2798,10 @@ function parseCOBOLV2(text, filename) {
 // ── 6. EXTENDED SYSTEM MODEL
 function buildSystemModelV2() {
   resolveCopybooks();
-      var model = buildSystemModelV2();
-      window._v2Model = model;
+  var model = buildSystemModel();        
+  window._v2Model = model;
   if (!model.nodeIndex) { model.nodeIndex={}; model.nodes.forEach(function(n){model.nodeIndex[n.id]=n;}); }
+
   function addN(n) { if (!model.nodeIndex[n.id]){model.nodes.push(n);model.nodeIndex[n.id]=n;} }
   function addE(from,to,kind,label,status) { if(from&&to) model.edges.push({from:from,to:to,kind:kind||'relates',label:label||'',status:status||RESOLVE.PARSED}); }
 
