@@ -1,0 +1,846 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reforge — Redesign Concept</title>
+<style>
+  :root{
+    --bg:#080b14; --bg2:#0d1120; --bg3:#141828; --bg4:#1a2035;
+    --border:#1e2540; --border2:#28304e;
+    --text:#e2e6f3; --text2:#8892b0; --text3:#4a5270;
+    --accent:#4f8fff; --accent2:#2563eb; --purple:#8b5cf6; --cyan:#22d3ee;
+    --green:#34d399; --yellow:#fbbf24; --red:#f87171;
+    --grad:linear-gradient(135deg,#4f8fff,#8b5cf6);
+  }
+  body.light{
+    --bg:#f0f2f9; --bg2:#fff; --bg3:#e8eaf5; --bg4:#dde0f0;
+    --border:#d0d5ea; --border2:#b8bdda;
+    --text:#0e1120; --text2:#3d456a; --text3:#8890aa;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:system-ui,-apple-system,'Segoe UI',sans-serif;
+    background:var(--bg); color:var(--text);
+    height:100vh; display:flex; flex-direction:column; overflow:hidden;
+    font-size:14px; -webkit-font-smoothing:antialiased;
+  }
+  .mono{font-family:ui-monospace,'Cascadia Code',Menlo,Consolas,monospace}
+
+  /* ── HEADER ── */
+  header{
+    display:flex; align-items:center; gap:12px; padding:0 20px; height:54px;
+    background:var(--bg2); border-bottom:1px solid var(--border);
+    flex-shrink:0; position:relative; z-index:10;
+  }
+  header::after{content:''; position:absolute; bottom:0; left:0; right:0; height:1px; background:var(--grad); opacity:.5}
+  .logo{font-family:ui-monospace,Menlo,monospace; font-size:17px; font-weight:700; background:var(--grad); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text}
+  .logo span{opacity:.55; font-weight:400}
+  .header-tag{font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--text2); border:1px solid var(--border2); border-radius:4px; padding:2px 8px}
+  .badge-concept{font-family:ui-monospace,Menlo,monospace; font-size:10px; color:var(--purple); border:1px dashed var(--purple); border-radius:4px; padding:2px 8px; letter-spacing:1px}
+  .header-spacer{flex:1}
+  .status{display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text2)}
+  .dot{width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 6px var(--green)}
+  .header-link{color:var(--text2); font-size:12px; text-decoration:none}
+  .header-link:hover{color:var(--accent)}
+  .theme-btn{background:var(--bg3); color:var(--text); border:1px solid var(--border2); border-radius:6px; padding:5px 10px; cursor:pointer; font-size:13px}
+
+  /* ── WORKSPACE ── */
+  .workspace{flex:1; display:grid; grid-template-columns:270px 1fr; min-height:0}
+
+  /* Left panel */
+  .left{background:var(--bg2); border-right:1px solid var(--border); padding:14px; display:flex; flex-direction:column; gap:12px; overflow-y:auto}
+  .panel-h{font-family:ui-monospace,Menlo,monospace; font-size:11px; letter-spacing:2px; text-transform:uppercase; color:var(--text3)}
+  .dropzone{
+    border:1.5px dashed var(--border2); border-radius:10px; padding:18px 12px;
+    text-align:center; color:var(--text2); transition:.15s; cursor:pointer; font-size:13px;
+  }
+  .dropzone:hover,.dropzone.hover{border-color:var(--accent); color:var(--text); background:rgba(79,143,255,.05)}
+  .dropzone .icon{font-size:22px; display:block; margin-bottom:6px}
+  .browse{color:var(--accent); text-decoration:underline}
+  .sample-btn{
+    width:100%; padding:10px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600;
+    color:#fff; background:var(--grad); border:none; transition:.15s;
+  }
+  .sample-btn:hover{filter:brightness(1.12)}
+  .analyze-btn{
+    width:100%; padding:9px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600;
+    background:var(--bg3); color:var(--text); border:1px solid var(--border2); transition:.15s;
+  }
+  .analyze-btn:hover:not(:disabled){border-color:var(--accent)}
+  .analyze-btn:disabled{opacity:.4; cursor:not-allowed}
+  .file-list{display:flex; flex-direction:column; gap:6px}
+  .file{display:flex; align-items:center; gap:8px; background:var(--bg3); border:1px solid var(--border); border-radius:7px; padding:7px 9px; font-size:12px}
+  .file .ficon{flex-shrink:0}
+  .file .fname{font-family:ui-monospace,Menlo,monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0}
+  .lang{font-family:ui-monospace,Menlo,monospace; font-size:9px; font-weight:700; border-radius:3px; padding:2px 5px; flex-shrink:0}
+  .lang-jcl{color:var(--cyan); border:1px solid var(--cyan)}
+  .lang-cbl{color:var(--accent); border:1px solid var(--accent)}
+  .lang-cpy{color:var(--yellow); border:1px solid var(--yellow)}
+  .lang-txt{color:var(--text2); border:1px solid var(--border2)}
+  .rm{background:none; border:none; color:var(--text3); cursor:pointer; font-size:15px; line-height:1; padding:0 4px; border-radius:4px; flex-shrink:0}
+  .rm:hover{color:var(--red); background:rgba(248,113,113,.12)}
+  .clear-btn{background:none; border:none; color:var(--text3); font-size:11px; cursor:pointer; text-align:left; padding:0; text-decoration:underline}
+  .clear-btn:hover{color:var(--red)}
+  .stat-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px}
+  .stat{background:var(--bg3); border:1px solid var(--border); border-radius:8px; padding:8px 10px}
+  .stat b{display:block; font-size:18px; font-family:ui-monospace,Menlo,monospace}
+  .stat span{font-size:11px; color:var(--text2)}
+
+  /* Right panel */
+  .right{display:flex; flex-direction:column; min-width:0; min-height:0}
+  .groups{display:flex; gap:6px; padding:10px 16px 0; border-bottom:1px solid var(--border); background:var(--bg2)}
+  .group{
+    padding:8px 16px; font-size:13px; font-weight:600; color:var(--text2); cursor:pointer;
+    border:1px solid transparent; border-bottom:none; border-radius:8px 8px 0 0; position:relative; top:1px;
+    display:flex; align-items:center; gap:7px;
+  }
+  .group:hover{color:var(--text)}
+  .group.active{color:var(--text); background:var(--bg); border-color:var(--border)}
+  .group.active .g-icon{opacity:1}
+  .g-icon{font-size:13px; opacity:.7}
+  .subtabs{display:flex; gap:2px; padding:9px 16px; background:var(--bg); border-bottom:1px solid var(--border); flex-wrap:wrap}
+  .subtab{padding:6px 13px; font-size:12.5px; color:var(--text2); cursor:pointer; border-radius:6px; border:1px solid transparent}
+  .subtab:hover{color:var(--text); background:var(--bg3)}
+  .subtab.active{color:var(--accent); background:rgba(79,143,255,.08); border-color:rgba(79,143,255,.3); font-weight:600}
+  .subtab.hot{color:var(--purple)}
+  .content{flex:1; overflow:auto; padding:18px}
+
+  /* Empty state */
+  .empty{height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; color:var(--text2)}
+  .empty .e-icon{font-size:34px; margin-bottom:10px; opacity:.6}
+  .empty .e-title{font-size:16px; font-weight:600; color:var(--text); margin-bottom:6px}
+  .empty .e-sub{font-size:13px; max-width:380px; line-height:1.5}
+  .empty .e-hint{margin-top:16px; font-size:12px; color:var(--text3)}
+
+  /* Generic cards */
+  .card{background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px}
+  .card h3{font-size:13px; margin-bottom:8px; color:var(--text)}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  table.tbl{width:100%; border-collapse:collapse; font-size:12.5px}
+  table.tbl th{text-align:left; font-family:ui-monospace,Menlo,monospace; font-size:10.5px; letter-spacing:1px; text-transform:uppercase; color:var(--text3); padding:6px 8px; border-bottom:1px solid var(--border2)}
+  table.tbl td{padding:7px 8px; border-bottom:1px solid var(--border); color:var(--text2)}
+  table.tbl td:first-child{color:var(--text); font-family:ui-monospace,Menlo,monospace; font-size:12px}
+  .pill{font-family:ui-monospace,Menlo,monospace; font-size:10px; border-radius:4px; padding:2px 7px}
+  .pill-io{color:var(--text2); border:1px solid var(--border2)}
+
+  /* Map */
+  .toolbar{display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap}
+  .toolbar input{background:var(--bg3); border:1px solid var(--border2); color:var(--text); border-radius:6px; padding:6px 10px; font-size:12.5px; width:200px}
+  .legend{display:flex; gap:12px; font-size:11px; color:var(--text2); margin-left:auto}
+  .legend i{display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:4px}
+  .svgwrap{background:var(--bg2); border:1px solid var(--border); border-radius:10px; overflow:hidden}
+  .node rect{stroke-width:1.5}
+  .node text{font-family:ui-monospace,Menlo,monospace; font-size:11px; fill:var(--text)}
+  .node .ntype{font-size:8.5px; letter-spacing:1px; fill:var(--text2)}
+  .edge{stroke:var(--border2); stroke-width:1.2; fill:none}
+
+  /* Flow steps */
+  .step-body{margin-bottom:14px}
+  .step-head{font-family:ui-monospace,Menlo,monospace; font-size:13px; font-weight:700; color:var(--accent)}
+  .step-sub{font-size:12px; color:var(--text2); margin-top:3px; line-height:1.5}
+
+  /* Code viewer */
+  .codeblock{background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px; overflow:auto; font-family:ui-monospace,Menlo,monospace; font-size:12px; line-height:1.6; white-space:pre}
+  .k{color:var(--purple)} .c{color:var(--text3)} .s{color:var(--green)} .n{color:var(--yellow)}
+  .code-cols{display:grid; grid-template-columns:1fr 1fr; gap:14px; min-width:0}
+  .code-cols .codeblock{min-height:220px}
+  .note{font-size:11.5px; color:var(--text2); margin-top:8px}
+  .note b{color:var(--yellow)}
+  .key-panel{display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:10px; padding:30px 20px; color:var(--text2); border:1.5px dashed var(--border2); border-radius:10px}
+  .key-panel .kp-icon{font-size:28px}
+  .key-panel p{font-size:12.5px; max-width:320px; line-height:1.6}
+  .key-input{background:var(--bg3); border:1px solid var(--border2); color:var(--text); border-radius:6px; padding:8px 12px; font-size:12.5px; width:min(280px,100%); font-family:ui-monospace,Menlo,monospace}
+  .key-input:focus{outline:none; border-color:var(--accent)}
+  .key-btn{background:var(--grad); color:#fff; border:none; border-radius:6px; padding:8px 14px; font-size:12px; font-weight:600; cursor:pointer}
+  .key-btn:hover{filter:brightness(1.12)}
+  .key-btn-subtle{background:var(--bg3); color:var(--text2); border:1px solid var(--border2); border-radius:6px; padding:8px 14px; font-size:12px; cursor:pointer}
+
+  /* Impact */
+  .impact-left{display:flex; flex-direction:column; gap:4px}
+  .entity{padding:8px 10px; border-radius:7px; font-family:ui-monospace,Menlo,monospace; font-size:12px; cursor:pointer; color:var(--text2); border:1px solid transparent}
+  .entity:hover{background:var(--bg3)}
+  .entity.sel{background:rgba(79,143,255,.08); color:var(--accent); border-color:rgba(79,143,255,.3)}
+  .impact-arrow{color:var(--text3); font-size:12px; padding:5px 0}
+  .entity-row{padding:7px 10px; border-radius:7px; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--text)}
+
+  /* Log */
+  .log{font-family:ui-monospace,Menlo,monospace; font-size:11.5px; line-height:1.8; color:var(--text2)}
+  .log .ok{color:var(--green)} .log .warn{color:var(--yellow)} .log .info{color:var(--accent)}
+
+  ::-webkit-scrollbar{width:9px;height:9px} ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:5px} ::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+
+<!-- analyzer.html — maquette redesign (compagnon de index.html, la landing). Héberger dans le même repo GitHub Pages. -->
+
+<header>
+  <div class="logo">REFORGE<span>.io</span></div>
+  <div class="header-tag">Legacy Analyzer</div>
+  <div class="badge-concept">REDESIGN CONCEPT</div>
+  <div class="header-spacer"></div>
+  <div class="status"><div class="dot"></div><span id="statusText">Ready</span></div>
+  <a class="header-link" href="mailto:adrien@vyniad.be">adrien@vyniad.be</a>
+  <button class="theme-btn" id="themeBtn">☀</button>
+</header>
+
+<div class="workspace">
+  <aside class="left">
+    <div class="panel-h">⬆ Source</div>
+    <div class="dropzone" id="dz">
+      <input type="file" id="fileInput" multiple style="display:none">
+      <span class="icon">📁</span>
+      Drop your legacy files here<br>
+      JCL · COBOL · CPY — mixed together<br>
+      or <span class="browse">browse files</span>
+    </div>
+    <button class="sample-btn" id="sampleBtn">⚡ Try with a sample system</button>
+    <div class="file-list" id="fileList"></div>
+    <button class="clear-btn" id="clearAll" onclick="clearAllFiles()" style="display:none">Clear all files</button>
+    <div class="stat-grid" id="stats"></div>
+    <button class="analyze-btn" id="analyzeBtn" disabled>▶ Analyze</button>
+  </aside>
+
+  <main class="right">
+    <nav class="groups" id="groups"></nav>
+    <nav class="subtabs" id="subtabs"></nav>
+    <section class="content" id="content"></section>
+  </main>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+//  PROTOTYPE FONCTIONNEL : drop réel + détection + parsing
+//  (mini-analyseur embarqué pour démontrer le UX)
+// ═══════════════════════════════════════════════════════════
+
+// ── Navigation : 4 groupes au lieu de 13 onglets plats ──
+const NAV = [
+  { id:'explore',   icon:'🗺', label:'Explore',   subs:[ {id:'map',label:'System Map'}, {id:'flow',label:'Flow'}, {id:'programs',label:'Programs'}, {id:'data',label:'Data'} ] },
+  { id:'analyze',   icon:'🔬', label:'Analyze',  subs:[ {id:'impact',label:'Impact'}, {id:'lineage',label:'Data Lineage'}, {id:'db2',label:'DB2 / SQL'}, {id:'summary',label:'Summary'} ] },
+  { id:'modernize', icon:'⚡', label:'Modernize', subs:[ {id:'python',label:'COBOL → Python',hot:true}, {id:'ai',label:'AI Explain',hot:true} ] },
+  { id:'tech',      icon:'🛠', label:'Tech',      subs:[ {id:'source',label:'Source'}, {id:'copybooks',label:'Copybooks'}, {id:'debug',label:'Debug'} ] },
+];
+
+const state = { files:[], loaded:false, log:[], group:'explore', sub:'map', entity:null, srcFile:null, pySel:null };
+
+// ══════════════════ 1. DÉTECTION & PARSING (réel) ══════════════════
+
+function base(n){ return n.replace(/\.[^.]+$/,'').toUpperCase(); }
+
+function detectLang(name, text){
+  const ext = (name.split('.').pop()||'').toUpperCase();
+  const t = text.toUpperCase();
+  if (ext === 'JCL') return 'JCL';
+  if (ext === 'CPY' || ext === 'COPY') return 'CPY';
+  if (/\bIDENTIFICATION DIVISION\b/.test(t) || /\bPROGRAM-ID\b/.test(t)) return 'CBL';
+  if (/^\s*\/\//m.test(t) && /\bEXEC\b/.test(t)) return 'JCL';
+  if (/\bPIC(TURE)?\s+[S9VX]/i.test(text) && !/\bPROCEDURE DIVISION\b/.test(t)) return 'CPY';
+  if (/\b(DIVISION|SECTION)\b/.test(t)) return 'CBL';
+  if (ext === 'CBL' || ext === 'COB' || ext === 'CB2') return 'CBL';
+  return 'TXT';
+}
+
+function parseFile(f){
+  f.parsed = {};
+  const t = f.text;
+  if (f.lang === 'JCL'){
+    const steps = []; let m;
+    const re = /\/\/(\S+)\s+EXEC\s+PGM=([^\s,']+)/gi;
+    while ((m = re.exec(t))) steps.push({ name:m[1], pgm:m[2].toUpperCase() });
+    const dsns = [];
+    const re2 = /DSN=('?)([^\s',]+)/gi;
+    while ((m = re2.exec(t))) dsns.push(m[2].toUpperCase());
+    f.parsed = { steps, dsns:[...new Set(dsns)] };
+  } else if (f.lang === 'CBL'){
+    const pid = (t.match(/PROGRAM-ID[.]\s*([A-Z0-9\-]+)/i)||[])[1];
+    const copies = []; let m;
+    const re = /\bCOPY\s+([A-Z0-9\-]+)/gi;
+    while ((m = re.exec(t))) copies.push(m[1].toUpperCase());
+    f.parsed = {
+      programId: (pid || f.name.replace(/\.[^.]+$/,'')).toUpperCase(),
+      copies: [...new Set(copies)],
+      sqlCount: (t.match(/\bEXEC\s+SQL\b/gi)||[]).length,
+      performs: (t.match(/\bPERFORM\b/gi)||[]).length,
+      gotos: (t.match(/\bGO\s+TO\b/gi)||[]).length
+    };
+  }
+}
+
+function buildGraph(){
+  const g = { jobs:[], programs:[], copybooks:[], datasets:[], edges:[] };
+  const seen = new Set();
+  const addEdge = (from,to) => {
+    from = String(from).toUpperCase(); to = String(to).toUpperCase();
+    const k = from+'→'+to;
+    if (from !== to && !seen.has(k)){ seen.add(k); g.edges.push({from,to}); }
+  };
+  state.files.forEach(f=>{
+    if (f.lang === 'JCL') g.jobs.push(f);
+    else if (f.lang === 'CBL') g.programs.push(f);
+    else if (f.lang === 'CPY') g.copybooks.push(f);
+  });
+  g.jobs.forEach(j=>{
+    const jid = base(j.name);
+    j.parsed.steps.forEach(s => addEdge(jid, s.pgm));
+    j.parsed.dsns.forEach(d => { if(!g.datasets.includes(d)) g.datasets.push(d); addEdge(jid, d); });
+  });
+  g.programs.forEach(p=>{
+    const pid = p.parsed.programId;
+    p.parsed.copies.forEach(c=>{
+      g.copybooks.forEach(cb=>{
+        const cbn = base(cb.name);
+        if (cbn === c || c.indexOf(cbn) === 0) addEdge(pid, cbn);
+      });
+    });
+  });
+  return g;
+}
+
+function typeOf(label, g){
+  if (g.jobs.some(j=>base(j.name)===label)) return 'JCL JOB';
+  if (g.programs.some(p=>p.parsed.programId===label)) return 'COBOL';
+  if (g.copybooks.some(c=>base(c.name)===label)) return 'COPYBOOK';
+  if (g.datasets.includes(label)) return 'DATASET';
+  return 'UNKNOWN';
+}
+
+// ══════════════════ 2. GESTION DES FICHIERS ══════════════════
+
+async function handleFiles(fl){
+  const arr = [...fl];
+  if (!arr.length) return;
+  for (const f of arr){
+    let text = '';
+    try { text = await f.text(); } catch(e){}
+    const lang = detectLang(f.name, text);
+    const nf = { name:f.name, lang, text, lines:text.split('\n').length, sample:false };
+    parseFile(nf);
+    // remplace un fichier homonyme
+    const i = state.files.findIndex(x=>x.name===nf.name);
+    if (i>=0) state.files[i] = nf; else state.files.push(nf);
+  }
+  renderLeft();
+  if (state.loaded) renderContent();
+}
+
+function removeFile(i){
+  state.files.splice(i,1);
+  if (!state.files.length){ resetAll(); return; }
+  if (state.srcFile && !state.files.some(f=>f.name===state.srcFile)) state.srcFile = state.files[0].name;
+  renderLeft(); renderContent();
+}
+
+function clearAllFiles(){ resetAll(); }
+
+function resetAll(){
+  state.files = []; state.loaded = false; state.log = [];
+  state.entity = null; state.srcFile = null; state.pySel = null;
+  state.group = 'explore'; state.sub = 'map';
+  document.getElementById('statusText').textContent = 'Ready';
+  renderLeft(); renderNav(); renderContent();
+}
+
+function analyze(){
+  if (!state.files.length) return;
+  buildLog();
+  state.loaded = true;
+  document.getElementById('statusText').textContent = 'Analysis complete';
+  state.group = 'explore'; state.sub = 'map';
+  renderLeft(); renderNav(); renderContent();
+}
+
+function buildLog(){
+  const L = []; const add = (cls,text)=>L.push({cls,text});
+  add('info', `[parse] ${state.files.length} file(s) received — language auto-detected per file`);
+  state.files.forEach(f=>{
+    const why = f.lang==='JCL' ? 'EXEC/DD statements' : f.lang==='CBL' ? 'PROGRAM-ID found' : f.lang==='CPY' ? 'record layout' : 'unknown format';
+    add('ok', `[ok] ${f.name} → ${f.lang} (${why})`);
+  });
+  const g = buildGraph();
+  g.programs.forEach(p=>p.parsed.copies.forEach(c=>{
+    if (!g.copybooks.some(cb=>base(cb.name)===c || c.indexOf(base(cb.name))===0))
+      add('warn', `[warn] ${p.parsed.programId}: copybook ${c} not uploaded`);
+  }));
+  g.jobs.forEach(j=>j.parsed.steps.forEach(s=>{
+    if (!g.programs.some(p=>p.parsed.programId===s.pgm))
+      add('warn', `[warn] ${base(j.name)}: external or unknown program ${s.pgm}`);
+  }));
+  add('info', `[done] ${g.jobs.length} job(s) · ${g.programs.length} program(s) · ${g.copybooks.length} copybook(s) · ${g.datasets.length} dataset(s)`);
+  state.log = L;
+}
+
+// ══════════════════ 3. ÉTAT VIDE ══════════════════
+
+function emptyState(icon, title, sub){
+  return `<div class="empty"><div class="e-icon">${icon}</div><div class="e-title">${title}</div><div class="e-sub">${sub}</div>
+  <div class="e-hint">💡 Tip: click <b>“Try with a sample system”</b> or drop your own files to see this panel in action.</div></div>`;
+}
+
+// ══════════════════ 4. SVG SYSTEM MAP (dynamique) ══════════════════
+
+function svgMap(filter=''){
+  const g = buildGraph();
+  const cols = [
+    {x:40,  w:150, type:'JCL JOB',  c:'var(--cyan)',   items:g.jobs.map(j=>base(j.name))},
+    {x:240, w:150, type:'COBOL',    c:'var(--accent)',  items:g.programs.map(p=>p.parsed.programId)},
+    {x:440, w:150, type:'COPYBOOK', c:'var(--yellow)', items:g.copybooks.map(c=>base(c.name))},
+    {x:640, w:170, type:'DATASET',  c:'var(--green)',   items:[...g.datasets]},
+  ];
+  const nodes = []; const idx = {};
+  cols.forEach(col=>col.items.forEach((label,i)=>{
+    idx[label] = nodes.length;
+    nodes.push({ label, type:col.type, c:col.c, x:col.x, y:18+i*70, w:col.w });
+  }));
+  const maxN = Math.max(1, ...cols.map(c=>c.items.length));
+  const height = 18 + (maxN-1)*70 + 44 + 16;
+  const width = 640 + 170 + 40;
+  const vis = new Set(nodes.filter(n=>n.label.toLowerCase().includes(filter.toLowerCase())).map(n=>n.label));
+  const edges = g.edges.filter(e=>idx[e.from]!=null && idx[e.to]!=null && vis.has(e.from) && vis.has(e.to)).map(e=>{
+    const A = nodes[idx[e.from]], B = nodes[idx[e.to]];
+    return `<path class="edge" marker-end="url(#arrow)" d="M ${A.x+A.w} ${A.y+22} C ${A.x+A.w+45} ${A.y+22}, ${B.x-45} ${B.y+22}, ${B.x} ${B.y+22}"/>`;
+  }).join('');
+  const nn = nodes.filter(n=>vis.has(n.label)).map(n=>`
+    <g class="node" transform="translate(${n.x},${n.y})">
+      <rect width="${n.w}" height="44" fill="var(--bg3)" stroke="${n.c}"/>
+      <text x="10" y="19">${n.label.length>18?n.label.slice(0,17)+'…':n.label}</text>
+      <text class="ntype" x="10" y="34">${n.type}</text>
+    </g>`).join('');
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" style="display:block">
+    <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--border2)"/></marker></defs>
+    ${edges}${nn}</svg>`;
+}
+
+// ══════════════════ 5. SYNTAX HIGHLIGHTING (léger) ══════════════════
+
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function hl(text){
+  const re = /\b(IDENTIFICATION DIVISION|PROCEDURE DIVISION|WORKING-STORAGE|FILE SECTION|PROGRAM-ID|END-PERFORM|END-EXEC|END-IF|GO TO|STOP RUN|PERFORM|COMPUTE|ROUNDED|UNTIL|EXEC SQL|SELECT|ASSIGN|DISPLAY|MOVE|COPY|READ|OPEN|CLOSE|PIC|ADD|END|JOB|EXEC|PGM|DSN|DD)\b/g;
+  return esc(text).replace(re, m=>`<span class="k">${m}</span>`);
+}
+function firstLines(text, n){
+  const l = text.split('\n');
+  return (l.length>n ? l.slice(0,n).join('\n') + `\n… (${l.length} lines total)` : l.join('\n'));
+}
+
+// ══════════════════ 5b. ANTHROPIC API KEY (stockage local) ══════════════════
+
+let _keyMem = null; // fallback si localStorage bloqué (iframe sandbox)
+function getKey(){ try{ return localStorage.getItem('reforge_api_key') || _keyMem; } catch(e){ return _keyMem; } }
+function saveKey(){
+  const v = document.getElementById('apiKeyInput').value.trim();
+  if (!v) return;
+  try { localStorage.setItem('reforge_api_key', v); } catch(e){ _keyMem = v; }
+  renderContent();
+}
+function removeKey(){ try { localStorage.removeItem('reforge_api_key'); } catch(e){} _keyMem = null; renderContent(); }
+function keyStatusHTML(){
+  if (getKey()) return `<div style="display:flex;flex-direction:column;gap:8px;align-items:center">
+    <span class="note" style="color:var(--green)">✓ API key stored locally in your browser</span>
+    <button class="key-btn-subtle" onclick="removeKey()">Remove key</button></div>`;
+  return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center">
+    <input class="key-input" id="apiKeyInput" type="password" placeholder="sk-ant-api03-…" autocomplete="off">
+    <button class="key-btn" onclick="saveKey()">Save locally</button></div>
+  <p class="note">Stored in your browser (localStorage) — never sent to our servers.</p>`;
+}
+
+// ══════════════════ 6. PANNEAUX ══════════════════
+
+const PANELS = {
+  map: () => state.loaded ? `
+    <div class="toolbar">
+      <input placeholder="Filter entities…" oninput="document.getElementById('mapHolder').innerHTML=svgMap(this.value)">
+      <div class="legend"><span><i style="background:var(--cyan)"></i>Jobs</span><span><i style="background:var(--accent)"></i>Programs</span><span><i style="background:var(--yellow)"></i>Copybooks</span><span><i style="background:var(--green)"></i>Datasets</span></div>
+    </div>
+    <div class="svgwrap" id="mapHolder">${svgMap()}</div>`
+    : emptyState('🗺','No system loaded','Drop your JCL and/or COBOL files — the system map will appear here once analysis is complete.'),
+
+  flow: () => {
+    if (!state.loaded) return emptyState('🔀','No flow computed','Dependencies between jobs, steps and COBOL paragraphs (PERFORM / CALL / GOTO) will appear here.');
+    const g = buildGraph();
+    if (!g.jobs.length) return emptyState('🔀','No JCL job found','Job steps are detected from //STEP EXEC PGM= statements.');
+    return g.jobs.map(j=>`
+      <div class="card" style="max-width:620px;margin-bottom:14px">
+        <h3>${base(j.name)} — job flow</h3>
+        ${j.parsed.steps.length ? j.parsed.steps.map(s=>`
+          <div class="step-body"><div class="step-head">//${esc(s.name)}</div>
+          <div class="step-sub">${s.desc ? esc(s.desc) : `EXEC PGM=${esc(s.pgm)}`}${g.programs.some(p=>p.parsed.programId===s.pgm) ? ' · <span style="color:var(--green)">✓ detected program</span>' : ' · <span style="color:var(--yellow)">external program</span>'}</div></div>`).join('')
+        : '<p class="note">No EXEC PGM step found in this job.</p>'}
+        ${j.parsed.dsns.length ? `<p class="note">DD datasets: ${j.parsed.dsns.map(esc).join(' · ')}</p>` : ''}
+      </div>`).join('');
+  },
+
+  programs: () => {
+    if (!state.loaded) return emptyState('🖥','No program loaded','JCL jobs and COBOL programs will appear here, regardless of their source language.');
+    const g = buildGraph();
+    const rows = [
+      ...g.jobs.map(j=>({name:base(j.name), lang:'JCL', lines:j.lines, by:'—'})),
+      ...g.programs.map(p=>({name:p.parsed.programId, lang:'COBOL', lines:p.lines,
+        by: g.jobs.filter(j=>j.parsed.steps.some(s=>s.pgm===p.parsed.programId)).map(j=>base(j.name)).join(', ') || '—'})),
+    ];
+    if (!rows.length) return emptyState('🖥','No program detected','Drop JCL or COBOL files to populate this view.');
+    return `<div class="card"><table class="tbl">
+      <tr><th>Program / Job</th><th>Language</th><th>Lines</th><th>Called by</th></tr>
+      ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td><span class="pill pill-io">${r.lang}</span></td><td>${r.lines}</td><td>${esc(r.by)}</td></tr>`).join('')}
+    </table></div>`;
+  },
+
+  data: () => {
+    if (!state.loaded) return emptyState('🗂','No data detected','JCL datasets, COBOL SELECT/FD files and data structures will appear here.');
+    const g = buildGraph();
+    if (!g.datasets.length) return emptyState('🗂','No dataset detected','Datasets are detected from JCL DD DSN= statements.');
+    return `<div class="card"><table class="tbl">
+      <tr><th>Dataset</th><th>Type</th><th>Referenced by</th></tr>
+      ${g.datasets.map(d=>{
+        const jobs = g.jobs.filter(j=>j.parsed.dsns.includes(d)).map(j=>base(j.name)).join(', ');
+        return `<tr><td>${esc(d)}</td><td><span class="pill pill-io">DATASET</span></td><td>${esc(jobs||'—')}</td></tr>`;
+      }).join('')}
+    </table><p class="note">Input/Output classification, FD-level matching and lineage are computed by the full analyzer engine.</p></div>`;
+  },
+
+  impact: () => {
+    if (!state.loaded) return emptyState('💥','Impact Analysis','Run analysis then select any entity to see its dependencies.');
+    const g = buildGraph();
+    const labels = [...g.jobs.map(j=>base(j.name)), ...g.programs.map(p=>p.parsed.programId), ...g.copybooks.map(c=>base(c.name)), ...g.datasets];
+    if (!labels.length) return emptyState('💥','Nothing to analyze yet','Drop files first.');
+    if (!state.entity || !labels.includes(state.entity)) state.entity = labels[0];
+    const label = state.entity;
+    const inc = g.edges.filter(e=>e.to===label).map(e=>e.from);
+    const progInc = inc.filter(i=>typeOf(i,g)==='COBOL');
+    const jobsAffected = [...new Set([
+      ...inc.filter(i=>typeOf(i,g)==='JCL JOB'),
+      ...g.edges.filter(e=>progInc.includes(e.to)).map(e=>e.from).filter(f=>typeOf(f,g)==='JCL JOB')
+    ])];
+    const out = g.edges.filter(e=>e.from===label).map(e=>e.to);
+    return `<div class="grid2" style="max-width:760px">
+      <div class="card impact-left">
+        <h3>Select an entity</h3>
+        ${labels.slice(0,12).map(l=>`<div class="entity ${l===label?'sel':''}" onclick="state.entity='${l}';renderContent()">${esc(l)}</div>`).join('')}
+      </div>
+      <div class="card">
+        <h3>Impact of changing <span class="mono" style="color:var(--accent)">${esc(label)}</span></h3>
+        ${progInc.length ? `<div class="impact-arrow">↓ ${progInc.length} program(s) recompile</div>${progInc.map(p=>`<div class="entity-row">${esc(p)}</div>`).join('')}` : ''}
+        ${jobsAffected.length ? `<div class="impact-arrow">↓ ${jobsAffected.length} job(s) to re-run</div>${jobsAffected.map(p=>`<div class="entity-row">${esc(p)}</div>`).join('')}` : ''}
+        ${inc.length && !progInc.length && !jobsAffected.length ? `<div class="impact-arrow">↓ ${inc.length} direct dependent(s)</div>${inc.map(p=>`<div class="entity-row">${esc(p)} <span class="note">(${typeOf(p,g)})</span></div>`).join('')}` : ''}
+        ${!inc.length ? '<p class="note">No dependent entity detected — this looks like a leaf node.</p>' : ''}
+        ${out.length ? `<div class="impact-arrow">→ references ${out.length} entit(ies)</div><div class="entity-row" style="color:var(--text2)">${out.map(esc).join(' · ')}</div>` : ''}
+      </div>
+    </div>`;
+  },
+
+  lineage: () => {
+    if (!state.loaded) return emptyState('🔀','No data lineage computed','Run analysis to trace data flows across your system.');
+    const g = buildGraph();
+    if (!g.datasets.length) return emptyState('🔀','No dataset detected','Lineage is built from DD DSN= statements and COBOL SELECT/FD.');
+    return `<div class="card" style="max-width:680px">
+      <h3>Data lineage</h3>
+      ${g.datasets.map(d=>{
+        const jobs = g.jobs.filter(j=>j.parsed.dsns.includes(d));
+        return jobs.map(j=>{
+          const jid = base(j.name);
+          return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px;margin-bottom:10px">
+            <span class="entity sel" style="cursor:default">${esc(d)}</span> ←
+            <span class="entity-row" style="padding:7px 10px;background:var(--bg3);border-radius:7px">${esc(jid)} <span class="note">(JCL DD)</span></span>
+            ${j.parsed.steps.map(s=>`← <span class="entity-row" style="padding:7px 10px;background:var(--bg3);border-radius:7px">${esc(s.pgm)}</span>`).join('')}
+          </div>`;
+        }).join('');
+      }).join('')}
+      <p class="note">Full FD-level lineage (COBOL SELECT/FD ↔ JCL DD matching) is computed by the analyzer engine.</p>
+    </div>`;
+  },
+
+  db2: () => {
+    if (!state.loaded) return emptyState('🗄','No DB2 / SQL detected','Upload COBOL with EXEC SQL … END-EXEC statements.');
+    const g = buildGraph();
+    const sqls = g.programs.filter(p=>p.parsed.sqlCount>0);
+    if (!sqls.length) return emptyState('🗄','No DB2 / SQL detected','No EXEC SQL statement found in the uploaded COBOL files.');
+    return sqls.map(p=>`
+      <div class="card" style="max-width:680px;margin-bottom:14px">
+        <h3>DB2 / SQL in ${esc(p.parsed.programId)}</h3>
+        <div class="log">${firstLines(p.text.split('\n').filter(l=>/EXEC\s+SQL/i.test(l)).join('\n') || 'EXEC SQL detected', 8)}</div>
+        <p class="note">${p.parsed.sqlCount} embedded SQL statement(s)</p>
+      </div>`).join('');
+  },
+
+  summary: () => {
+    if (!state.loaded) return emptyState('📋','Summary not available','Run analysis to generate a system overview.');
+    const g = buildGraph();
+    const jobNames = g.jobs.map(j=>base(j.name)).join(', ') || 'none';
+    const progNames = g.programs.map(p=>p.parsed.programId).join(', ') || 'none';
+    const unresolved = [];
+    g.programs.forEach(p=>p.parsed.copies.forEach(c=>{
+      if (!g.copybooks.some(cb=>base(cb.name)===c || c.indexOf(base(cb.name))===0)) unresolved.push(`${p.parsed.programId} → ${c}`);
+    }));
+    const gotoFiles = g.programs.filter(p=>p.parsed.gotos>0).map(p=>`${p.parsed.programId} (${p.parsed.gotos}× GO TO)`);
+    return `<div class="grid2" style="max-width:760px">
+      <div class="card"><h3>System overview</h3>
+        <p class="note" style="font-size:13px;line-height:1.6;color:var(--text2)">
+        This system contains <b class="mono" style="color:var(--text)">${g.jobs.length}</b> JCL job(s) (${esc(jobNames)}),
+        <b class="mono" style="color:var(--text)">${g.programs.length}</b> COBOL program(s) (${esc(progNames)}),
+        ${g.copybooks.length} copybook(s) and ${g.datasets.length} dataset(s).
+        ${g.jobs.length ? 'Job orchestration and program references were resolved from EXEC PGM statements; copybook usage from COPY statements.' : ''}</p></div>
+      <div class="card"><h3>Health signals</h3>
+        <div class="log">
+          ${g.copybooks.length && !unresolved.length ? '<span class="ok">✓ All copybooks resolved</span><br>' : ''}
+          ${!g.jobs.some(j=>j.parsed.steps.some(s=>!g.programs.some(p=>p.parsed.programId===s.pgm) && ['SORT','IEBGENER','IEBPTPCH','IDCAMS'].indexOf(s.pgm)<0)) ? '<span class="ok">✓ All PGM references resolved</span><br>' : ''}
+          ${unresolved.length ? `<span class="warn">⚠ Missing copybook: ${esc(unresolved.join(', '))}</span><br>` : ''}
+          ${gotoFiles.length ? `<span class="warn">⚠ GO TO usage (spaghetti risk): ${esc(gotoFiles.join(', '))}</span><br>` : ''}
+          ${g.programs.some(p=>p.parsed.sqlCount>0) ? `<span class="warn">⚠ Embedded SQL detected (DB2 dependencies)</span><br>` : ''}
+        </div></div>
+    </div>`;
+  },
+
+  python: () => {
+    if (!state.loaded) return emptyState('⚡','COBOL → Python Translation','Analyze a COBOL file, then select it here to generate equivalent Python code via AI.');
+    const g = buildGraph();
+    if (!g.programs.length) return emptyState('⚡','No COBOL program found','Drop COBOL files to enable translation.');
+    if (!state.pySel || !g.programs.some(p=>p.parsed.programId===state.pySel)) state.pySel = g.programs[0].parsed.programId;
+    const p = g.programs.find(p=>p.parsed.programId===state.pySel);
+    const src = firstLines(p.text, 40);
+    const isSample = !!p.sample && p.parsed.programId === 'CBPAY100';
+    return `
+    <div class="toolbar">${g.programs.map(x=>`<span class="subtab ${x.parsed.programId===state.pySel?'active':''}" onclick="state.pySel='${x.parsed.programId}';renderContent()">${esc(x.parsed.programId)}</span>`).join('')}</div>
+    <div class="code-cols">
+      <div><h3 style="font-size:13px;margin-bottom:8px">COBOL — ${esc(state.pySel)}</h3>
+        <div class="codeblock">${hl(src)}</div></div>
+      <div>
+        <h3 style="font-size:13px;margin-bottom:8px">⚡ Python (AI-generated)</h3>
+        ${isSample ? `<div class="codeblock"><span class="c"># Compute gross pay</span>
+gross_pay = <span class="n">round</span>(hours * rate)
+
+<span class="k">if</span> gross_pay &gt; <span class="n">5000.00</span>:
+    gross_pay = <span class="n">5000.00</span>
+
+total += gross_pay</div>
+        <p class="note">🔑 Requires an Anthropic API key — <b>stored locally, never sent to our servers.</b> AI output is a comprehension aid, not production-ready code.</p>
+        <div style="margin-top:10px">${keyStatusHTML()}</div>`
+        : `<div class="key-panel"><div class="kp-icon">🔑</div>
+           <p><b>AI translation runs in the full analyzer</b> with your own Anthropic API key (stored locally, never sent to our servers).<br><br>This prototype renders a sample translation only for the demo program CBPAY100.</p>
+           ${keyStatusHTML()}
+           <p class="note">AI output is a comprehension aid, not production-ready code.</p></div>`}
+      </div>
+    </div>`;
+  },
+
+  ai: () => {
+    if (!state.loaded) return emptyState('✦','AI System Explanation','Run analysis to enable AI-powered system understanding.');
+    const g = buildGraph();
+    const isSample = state.files.some(f=>f.sample);
+    if (isSample) return `
+      <div class="card" style="max-width:700px">
+        <h3>✦ AI explanation — PAYRUN0 system</h3>
+        <p class="note" style="font-size:13px;line-height:1.7;color:var(--text2)">
+        “This is a classic z/OS payroll batch job. STEP010 sorts the daily transactions file so records are processed
+        in account order. STEP020 (CBPAY100) computes gross pay for each transaction and enriches records from the
+        customer master file via copybook PAYREC.CPY. STEP030 (CBPAY200) applies deductions, writes the payroll
+        master file and posts history rows to DB2. Because both programs share the record layout, any change to
+        PAYREC.CPY requires recompiling both — see the Impact tab.”</p>
+        <p class="note">Generated locally with your own API key.</p>
+        <div style="margin-top:10px">${keyStatusHTML()}</div>
+      </div>`;
+    return `<div class="card" style="max-width:700px">
+      <h3>✦ AI System Explanation</h3>
+      <p class="note" style="font-size:13px;line-height:1.7;color:var(--text2)">
+      Your system contains ${g.jobs.length} job(s), ${g.programs.length} program(s), ${g.copybooks.length} copybook(s) and ${g.datasets.length} dataset(s).
+      The full analyzer sends this structure (never your source code) to Claude with your own API key to generate a
+      plain-English explanation of what the system does and how the pieces connect.</p>
+      <div class="key-panel" style="margin-top:12px"><div class="kp-icon">🔑</div><p>AI explanation runs in the full analyzer with your locally-stored Anthropic API key. This prototype shows the static sample output only.</p>${keyStatusHTML()}</div>
+    </div>`;
+  },
+
+  source: () => {
+    if (!state.loaded) return emptyState('📄','No source loaded','Select a file from the list to view its syntax-highlighted content.');
+    if (!state.srcFile || !state.files.some(f=>f.name===state.srcFile)) state.srcFile = state.files[0].name;
+    const f = state.files.find(f=>f.name===state.srcFile);
+    return `
+    <div class="toolbar">${state.files.map(x=>`<span class="subtab ${x.name===state.srcFile?'active':''}" onclick="state.srcFile='${x.name}';renderContent()">${esc(x.name)}</span>`).join('')}</div>
+    <div class="codeblock">${hl(firstLines(f.text, 300))}</div>`;
+  },
+
+  copybooks: () => {
+    if (!state.loaded) return emptyState('📋','No copybooks detected','Upload .CPY files alongside your COBOL programs.');
+    const g = buildGraph();
+    const unresolved = [];
+    g.programs.forEach(p=>p.parsed.copies.forEach(c=>{
+      if (!g.copybooks.some(cb=>base(cb.name)===c || c.indexOf(base(cb.name))===0)) unresolved.push(`${p.parsed.programId} → ${c}`);
+    }));
+    if (!g.copybooks.length && !unresolved.length) return emptyState('📋','No copybooks detected','Upload .CPY files alongside your COBOL programs.');
+    let html = '';
+    if (g.copybooks.length){
+      html += `<div class="card" style="max-width:680px;margin-bottom:14px"><table class="tbl">
+        <tr><th>Copybook</th><th>Used by</th></tr>
+        ${g.copybooks.map(cb=>{
+          const users = g.programs.filter(p=>p.parsed.copies.some(c=>base(cb.name)===c || c.indexOf(base(cb.name))===0)).map(p=>p.parsed.programId).join(', ');
+          return `<tr><td>${esc(base(cb.name))}</td><td>${esc(users||'—')}</td></tr>`;
+        }).join('')}
+      </table></div>`;
+    }
+    if (unresolved.length){
+      html += `<div class="card" style="max-width:680px"><h3>⚠ Unresolved copy references</h3>
+      <div class="log">${unresolved.map(u=>`<span class="warn">[missing] ${esc(u)}</span>`).join('<br>')}</div>
+      <p class="note">Upload the matching .CPY files to resolve these layouts and compute recompile impact.</p></div>`;
+    }
+    return html;
+  },
+
+  debug: () => {
+    if (!state.loaded) return emptyState('🔬','No analysis run yet','The parsing log (JCL + COBOL) will appear here.');
+    return `<div class="card log" style="max-width:680px">
+      ${state.log.map(l=>`<div><span class="${l.cls}">${l.text}</span></div>`).join('')}
+    </div>`;
+  },
+};
+
+function renderContent(){
+  const c = document.getElementById('content');
+  c.innerHTML = PANELS[state.sub] ? PANELS[state.sub]() : emptyState('…','Coming soon','');
+}
+
+// ══════════════════ 7. NAVIGATION ══════════════════
+
+function renderNav(){
+  const g = NAV.find(n=>n.id===state.group);
+  document.getElementById('groups').innerHTML = NAV.map(n =>
+    `<div class="group ${n.id===state.group?'active':''}" onclick="switchGroup('${n.id}')"><span class="g-icon">${n.icon}</span>${n.label}</div>`
+  ).join('');
+  document.getElementById('subtabs').innerHTML = g.subs.map(s =>
+    `<div class="subtab ${s.id===state.sub?'active':''} ${s.hot?'hot':''}" onclick="switchSub('${s.id}')">${s.label}</div>`
+  ).join('');
+}
+function switchGroup(id){
+  state.group = id;
+  state.sub = NAV.find(n=>n.id===id).subs[0].id;
+  renderNav(); renderContent();
+}
+function switchSub(id){ state.sub = id; renderNav(); renderContent(); }
+
+// ══════════════════ 8. PANNEAU GAUCHE ══════════════════
+
+function fIcon(lang){ return lang==='JCL' ? '📄' : lang==='CPY' ? '📋' : lang==='CBL' ? '🖥' : '❓'; }
+
+function renderLeft(){
+  document.getElementById('fileList').innerHTML = state.files.map((f,i)=>`
+    <div class="file">
+      <span class="ficon">${fIcon(f.lang)}</span>
+      <span class="fname" title="${esc(f.name)}">${esc(f.name)}</span>
+      <span class="lang lang-${f.lang.toLowerCase()}">${f.lang}</span>
+      <button class="rm" title="Remove this file" onclick="removeFile(${i})">×</button>
+    </div>`).join('');
+  document.getElementById('clearAll').style.display = state.files.length ? 'block' : 'none';
+  const g = buildGraph();
+  document.getElementById('stats').innerHTML = state.files.length ?
+    `<div class="stat"><b>${state.files.length}</b><span>Files</span></div>
+     <div class="stat"><b>${g.jobs.length}</b><span>JCL jobs</span></div>
+     <div class="stat"><b>${g.programs.length}</b><span>Programs</span></div>
+     <div class="stat"><b>${g.datasets.length}</b><span>Datasets</span></div>` : '';
+  document.getElementById('analyzeBtn').disabled = !state.files.length;
+}
+
+// ══════════════════ 9. SAMPLE SYSTEM ══════════════════
+
+const SAMPLE_FILES = [
+  { name:'PAYRUN0.JCL', lang:'JCL', lines:23, sample:true,
+    text:`//PAYRUN0  JOB  (ACCT),'MONTHLY PAYROLL',CLASS=A,MSGCLASS=X
+//*--------------------------------------------------------------
+//* MONTHLY PAYROLL RUN — sample extract
+//*--------------------------------------------------------------
+//STEP010  EXEC PGM=SORT
+//SORTIN  DD DSN=PAYROLL.TRANS,DISP=SHR
+//SYSOUT  DD SYSOUT=*
+//STEP020  EXEC PGM=CBPAY100
+//TRANS   DD DSN=PAYROLL.TRANS,DISP=OLD
+//MASTER  DD DSN=BANK.CUST.MSTR,DISP=SHR
+//PAYMAST DD DSN=PAYROLL.MASTER,DISP=(,CATLG)
+//STEP030  EXEC PGM=CBPAY200
+//PAYMAST DD DSN=PAYROLL.MASTER,DISP=OLD
+//SYSOUT  DD SYSOUT=*`,
+    parsed:{ steps:[
+      {name:'STEP010', pgm:'SORT',    desc:'Sort PAYROLL.TRANS by account number'},
+      {name:'STEP020', pgm:'CBPAY100', desc:'Compute gross pay · reads BANK.CUST.MSTR'},
+      {name:'STEP030', pgm:'CBPAY200', desc:'Net pay & payments · EXEC SQL update'}],
+      dsns:['PAYROLL.TRANS','BANK.CUST.MSTR','PAYROLL.MASTER'] } },
+  { name:'CBPAY100.CBL', lang:'CBL', lines:24, sample:true,
+    text:`IDENTIFICATION DIVISION.
+PROGRAM-ID. CBPAY100.
+DATA DIVISION.
+FILE SECTION.
+FD  TRANS-FILE.
+COPY PAYREC.
+WORKING-STORAGE SECTION.
+01  WS-HOURS      PIC 9(4)V99.
+01  WS-RATE       PIC 9(4)V99.
+01  WS-GROSS-PAY  PIC 9(7)V99.
+PROCEDURE DIVISION.
+PERFORM UNTIL EOF-FLAG = 'Y'
+    READ TRANS-FILE AT END MOVE 'Y' TO EOF-FLAG
+    COMPUTE WS-GROSS-PAY ROUNDED = WS-HOURS * WS-RATE
+END-PERFORM.
+STOP RUN.`,
+    parsed:{ programId:'CBPAY100', copies:['PAYREC'], sqlCount:0, performs:1, gotos:0 } },
+  { name:'CBPAY200.CBL', lang:'CBL', lines:19, sample:true,
+    text:`IDENTIFICATION DIVISION.
+PROGRAM-ID. CBPAY200.
+DATA DIVISION.
+WORKING-STORAGE SECTION.
+COPY PAYREC.
+PROCEDURE DIVISION.
+MAIN-PARA.
+    EXEC SQL DECLARE C1 CURSOR FOR
+        SELECT ACC_ID, BALANCE FROM PAYROLL.ACCOUNTS
+        WHERE STATUS = 'A'
+    END-EXEC.
+    IF WS-GROSS-PAY > 5000.00
+        GO TO CAP-PARA.
+    EXEC SQL UPDATE PAYROLL.PAYHIST
+        SET PAID = :WS-PAID-FLAG END-EXEC.
+CAP-PARA.
+    STOP RUN.`,
+    parsed:{ programId:'CBPAY200', copies:['PAYREC'], sqlCount:2, performs:0, gotos:1 } },
+  { name:'PAYREC.CPY', lang:'CPY', lines:6, sample:true,
+    text:`01  PAY-RECORD.
+    05  ACC-ID      PIC 9(8).
+    05  EMP-NAME    PIC X(25).
+    05  HOURS       PIC 9(4)V99.
+    05  RATE        PIC 9(4)V99.`,
+    parsed:{} },
+];
+
+function loadSample(){
+  state.files = JSON.parse(JSON.stringify(SAMPLE_FILES));
+  state.log = [
+    {cls:'info', text:'[parse] 4 files received — language auto-detected per file'},
+    {cls:'ok',   text:'[ok] PAYRUN0.JCL → JCL (EXEC/DD statements)'},
+    {cls:'ok',   text:'[ok] CBPAY100.CBL → COBOL (PROGRAM-ID found)'},
+    {cls:'ok',   text:'[ok] CBPAY200.CBL → COBOL (EXEC SQL detected)'},
+    {cls:'ok',   text:'[ok] PAYREC.CPY → Copybook'},
+    {cls:'warn', text:'[warn] STEP010: external program SORT'},
+    {cls:'info', text:'[done] 1 job · 2 programs · 3 datasets · 1 copybook · 2 SQL stmts'},
+  ];
+  state.loaded = true;
+  state.entity = null; state.srcFile = null; state.pySel = null;
+  state.group = 'explore'; state.sub = 'map';
+  document.getElementById('statusText').textContent = 'Sample system loaded';
+  renderLeft(); renderNav(); renderContent();
+}
+
+// ══════════════════ 10. WIRING ══════════════════
+
+const dz = document.getElementById('dz');
+const fi = document.getElementById('fileInput');
+dz.addEventListener('click', e => { if (e.target.tagName !== 'INPUT') fi.click(); });
+fi.addEventListener('change', () => { handleFiles(fi.files); fi.value = ''; });
+['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); dz.classList.add('hover'); }));
+['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); dz.classList.remove('hover'); }));
+dz.addEventListener('drop', e => { handleFiles(e.dataTransfer.files); });
+document.getElementById('sampleBtn').onclick = loadSample;
+document.getElementById('analyzeBtn').onclick = analyze;
+document.getElementById('themeBtn').onclick = () => {
+  document.body.classList.toggle('light');
+  document.getElementById('themeBtn').textContent = document.body.classList.contains('light') ? '🌙' : '☀';
+};
+
+renderLeft(); renderNav(); renderContent();
+</script>
+</body>
+</html>
