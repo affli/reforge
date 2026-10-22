@@ -272,6 +272,62 @@
   /* ── ZOOM BTNS ── */
   .zoom-btn{width:30px;height:30px;background:var(--bg2);border:1px solid var(--border2);border-radius:6px;color:var(--text2);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;}
   .zoom-btn:hover{background:var(--bg3);color:var(--text);border-color:var(--accent);}
+
+  /* ── PASTE SECTION ── */
+  .paste-section { margin: 0 14px; }
+
+  .paste-toggle {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%; padding: 9px 12px;
+    background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 8px; cursor: pointer;
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    color: var(--text3); transition: all .15s; text-align: left;
+  }
+  .paste-toggle:hover { border-color: var(--accent); color: var(--accent); }
+  .paste-toggle.active { border-color: var(--accent); color: var(--accent); background: rgba(79,143,255,.06); }
+  .paste-chevron { margin-left: auto; font-size: 16px; transition: transform .2s; line-height: 1; }
+  .paste-toggle.active .paste-chevron { transform: rotate(90deg); }
+
+  #pastePanel {
+    display: none;
+    margin-top: 6px;
+  }
+  #pastePanel.open { display: block; }
+
+  .paste-inner {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+  }
+
+  #pasteTextarea {
+    display: block; width: 100%; min-height: 100px; max-height: 200px;
+    background: transparent; border: none; border-bottom: 1px solid var(--border);
+    color: var(--text); font-family: 'IBM Plex Mono', monospace;
+    font-size: 10.5px; line-height: 1.65; padding: 10px 12px;
+    resize: vertical; outline: none;
+  }
+  #pasteTextarea::placeholder { color: var(--text3); }
+
+  .paste-footer {
+    display: flex; align-items: center; gap: 0;
+    background: var(--bg2);
+  }
+  #pasteFilename {
+    flex: 1; background: transparent; border: none;
+    color: var(--text2); font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px; padding: 8px 10px; outline: none;
+  }
+  #pasteFilename::placeholder { color: var(--text3); }
+  #pasteAddBtn {
+    padding: 8px 14px; background: var(--grad);
+    border: none; border-left: 1px solid var(--border);
+    color: #fff; font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px; font-weight: 600; cursor: pointer;
+    transition: opacity .15s; white-space: nowrap;
+  }
+  #pasteAddBtn:hover { opacity: .85; }
+
 </style>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-TMZLXLY7BC"></script>
 <script>
@@ -327,15 +383,22 @@
       <div class="upload-sub">ou <em onclick="document.getElementById('fileInput').click()">browse</em></div>
     </div>
 
-    <button class="paste-toggle-btn" id="pasteToggleBtn">✎ Paste code directly</button>
-
-    <div class="paste-panel" id="pastePanel" style="display:none">
-      <textarea id="pasteTextarea" class="paste-textarea" placeholder="Paste your code (JCL, COBOL…) here — language will be detected automatically" spellcheck="false"></textarea>
-      <div class="paste-actions">
-        <input type="text" id="pasteFilename" class="paste-filename" placeholder="filename (optional)" />
-        <button class="paste-add-btn" id="pasteAddBtn">+ Add</button>
+    <div class="paste-section">
+      <button class="paste-toggle" id="pasteToggleBtn">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        Paste code
+        <span class="paste-chevron" id="pasteChevron">&#8250;</span>
+      </button>
+      <div id="pastePanel">
+        <div class="paste-inner">
+          <textarea id="pasteTextarea" spellcheck="false" placeholder="Paste JCL, COBOL or CPY here&#10;Language is auto-detected"></textarea>
+          <div class="paste-footer">
+            <input type="text" id="pasteFilename" placeholder="filename.cbl (optional)">
+            <button id="pasteAddBtn">Add</button>
+          </div>
+        </div>
       </div>
-    </div>
+    </div></div>
 
     <div class="file-info" id="fileInfo">
       <div id="fileListItems"></div>
@@ -1615,9 +1678,7 @@ function ingestFile(filename, text, encoding, warning, size, pasted) {
   let notes   = [];
   let format  = null;
 
-  if (language === 'copybook') {
-    f.parsedCopybook = parseCopybook(text, filename);
-  } else if (language === 'jcl') {
+  if (language === 'jcl') {
     format = detectFormat(text) || FORMAT.JCL_PURE;
     const norm = normalizeToJCL(text, format);
     content = norm.jcl;
@@ -2690,7 +2751,7 @@ function parseCopybook(text, filename) {
     var level = parseInt(lm[1]), fn2 = lm[2].toUpperCase(), rest = lm[3]||'';
     var fld = { level:level, name:fn2, pic:null, occurs:null, redefines:null, value:null, children:[] };
     var pm = rest.match(/PIC(?:TURE)?\s+(?:IS\s+)?([\w9XVSABPZvs()+\-.,\/]+)/i);
-    if (pm) fld.pic = pm[1].toUpperCase();
+    if (pm) fld.pic = pm[1].replace(/\.$/,'').toUpperCase();
     var om = rest.match(/OCCURS\s+(\d+)(?:\s+TO\s+(\d+))?/i);
     if (om) fld.occurs = { min:parseInt(om[1]), max:om[2]?parseInt(om[2]):parseInt(om[1]) };
     var rm = rest.match(/REDEFINES\s+([\w-]+)/i);
@@ -2742,16 +2803,37 @@ function parseSQLStmt(sql, prog) {
 function detectVSAMOps(cobolText, files) {
   var ops = [], lines = cobolText.replace(/\r/g,'').split('\n');
   var fnames = (files||[]).map(function(f){return f.fileName;});
+
+  // Extraire les FD et leur record 01 associé
+  var fdMap = {}; // recordName -> fileName
+  var lastFD = null;
+  for (var i=0; i<lines.length; i++) {
+    var l = lines[i].replace(/\s+/g,' ').trim().toUpperCase();
+    var fdM = l.match(/^FD\s+([\w-]+)/);
+    if (fdM) {
+      lastFD = fdM[1];
+      if (fnames.indexOf(lastFD) === -1) fnames.push(lastFD);
+    }
+    var recM = l.match(/^01\s+([\w-]+)/);
+    if (recM && lastFD) {
+      fdMap[recM[1]] = lastFD;
+      lastFD = null;
+    }
+  }
+
   for (var i=0; i<lines.length; i++) {
     var l = lines[i].replace(/\s+/g,' ').trim().toUpperCase();
     var m = l.match(/^(READ|WRITE|REWRITE|DELETE|START)\s+([\w-]+)/);
-    if (!m || fnames.indexOf(m[2])===-1) continue;
-    var fi = (files||[]).find(function(f){return f.fileName===m[2];});
-    ops.push({ operation:m[1], fileName:m[2], assignTo:fi?fi.assignTo:null, organization:fi?fi.organization:null });
+    if (!m) continue;
+    var target = m[2];
+    // target peut être un nom de fichier OU un nom de record
+    var fileName = fnames.indexOf(target) !== -1 ? target : (fdMap[target] || null);
+    if (!fileName) continue;
+    var fi = (files||[]).find(function(f){return f.fileName===fileName;});
+    ops.push({ operation:m[1], fileName:fileName, assignTo:fi?fi.assignTo:null, organization:fi?fi.organization:null });
   }
   return ops;
 }
-
 function isVSAMDataset(dsn, org) {
   var u = (dsn||'').toUpperCase();
   return u.includes('.VSAM.')||u.endsWith('.KSDS')||u.endsWith('.ESDS')||u.endsWith('.RRDS')||/INDEXED|RELATIVE/.test((org||'').toUpperCase());
@@ -2798,10 +2880,9 @@ function parseCOBOLV2(text, filename) {
 // ── 6. EXTENDED SYSTEM MODEL
 function buildSystemModelV2() {
   resolveCopybooks();
-  var model = buildSystemModel();        
-  window._v2Model = model;
+      var model = buildSystemModel();
+      window._v2Model = model;
   if (!model.nodeIndex) { model.nodeIndex={}; model.nodes.forEach(function(n){model.nodeIndex[n.id]=n;}); }
-
   function addN(n) { if (!model.nodeIndex[n.id]){model.nodes.push(n);model.nodeIndex[n.id]=n;} }
   function addE(from,to,kind,label,status) { if(from&&to) model.edges.push({from:from,to:to,kind:kind||'relates',label:label||'',status:status||RESOLVE.PARSED}); }
 
@@ -3186,22 +3267,13 @@ function runAnalysis() {
       if (typeof renderFlowTab === 'function') renderFlowTab(model);
       if (typeof renderSourceTab === 'function') renderSourceTab();
       if (typeof renderTranslateTab === 'function') renderTranslateTab();
+      
       if (typeof renderCopybooksTab === 'function') renderCopybooksTab(model);
-        if (typeof renderDB2Tab === 'function') renderDB2Tab(model);
-        if (typeof renderLineageTab === 'function') renderLineageTab(model);
-        if (typeof renderImpactTab === 'function') renderImpactTab(model);
-        if (typeof renderAITab === 'function') renderAITab(model);
-        if (typeof renderCopybooksTab === 'function') renderCopybooksTab(model);
-        if (typeof renderDB2Tab === 'function') renderDB2Tab(model);
-        if (typeof renderLineageTab === 'function') renderLineageTab(model);
-        if (typeof renderImpactTab === 'function') renderImpactTab(model);
-        if (typeof renderAITab === 'function') renderAITab(model);
-        if (typeof renderCopybooksTab === 'function') renderCopybooksTab(model);
-        if (typeof renderDB2Tab === 'function') renderDB2Tab(model);
-        if (typeof renderLineageTab === 'function') renderLineageTab(model);
-        if (typeof renderImpactTab === 'function') renderImpactTab(model);
-        if (typeof renderAITab === 'function') renderAITab(model);
-        if (typeof renderSummaryTab === 'function') renderSummaryTab(model, { jclCount, cobolCount, unknownCount });
+      if (typeof renderDB2Tab === 'function') renderDB2Tab(model);
+      if (typeof renderLineageTab === 'function') renderLineageTab(model);
+      if (typeof renderImpactTab === 'function') renderImpactTab(model);
+      if (typeof renderAITab === 'function') renderAITab(model);
+      if (typeof renderSummaryTab === 'function') renderSummaryTab(model, { jclCount, cobolCount, unknownCount });
 
       const nf = names.length;
       parseBtn.textContent = `✓ ${nf} fichier${nf>1?'s analysés':' analysé'} · ${model.nodes.length} nœuds · ${model.edges.length} liens`;
@@ -3398,7 +3470,7 @@ function addPastedCode() {
   renderFileList();
   pasteTextarea.value = '';
   if (pasteFilename) pasteFilename.value = '';
-  if (pastePanel) pastePanel.style.display = 'none';
+  if (pastePanel) pastePanel.classList.remove('open'); pasteToggleBtn.classList.remove('active');
   if (pasteToggleBtn) pasteToggleBtn.classList.remove('active');
 }
 
