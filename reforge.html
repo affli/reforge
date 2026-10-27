@@ -180,7 +180,7 @@
 </head>
 <body>
 
-<!-- analyzer.html — maquette redesign (compagnon de index.html, la landing). Héberger dans le même repo GitHub Pages. -->
+<!-- reforge.html — maquette redesign (compagnon de index.html, la landing). Héberger dans le même repo GitHub Pages. -->
 
 <header>
   <div class="logo">REFORGE<span>.io</span></div>
@@ -249,17 +249,274 @@ function detectLang(name, text){
   return 'TXT';
 }
 
+// ── JCL ENGINE v2 ─────────────────────────────────────────────────────────
+// Real tokenizer → statement parser → model builder. Handles:
+// JOB/EXEC/DD/PROC/PEND/SET/IF-ELSE-ENDIF/INCLUDE/JCLLIB, in-stream PROC
+// expansion, symbolic parameters (SET, PROC defaults, EXEC symbols),
+// EXEC overrides (PROCSTEP.DD.PARAM), DISP input/output classification,
+// GDG (±n), temp datasets (&&), in-stream data (DD *), continuations,
+// columns 73-80. Never throws: anything unrecognized lands in warnings[].
+
+const JCL_OPS = new Set([
+  'JOB', 'EXEC', 'DD', 'PROC', 'PEND', 'SET', 'IF', 'ELSE', 'ENDIF',
+  'OUTPUT', 'INCLUDE', 'JCLLIB', 'COMMAND', 'XMIT', 'CNTL', 'ENDCNTL', 'EXPORT',
+]);
+const EXEC_STD_PARAMS = new Set([
+  'PGM', 'PROC', 'PARM', 'COND', 'TIME', 'REGION', 'ADDRSPC', 'DYNAMNBR',
+  'CLASS', 'MSGCLASS', 'MSGLEVEL', 'NOTIFY', 'USER', 'PASSWORD', 'TYPRUN', 'ACCT',
+]);
+
+function tokenizeStatements(text, warnings){
+  const statements = [];
+  const lines = text.split(/\r?\n/);
+  let inStreamData = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].slice(0, 72).trimEnd();
+    const ln = i + 1;
+    if (!line.trim()) continue;
+    if (inStreamData) {
+      if (line.startsWith('/*') || line.startsWith('//')) inStreamData = false;
+      else continue;
+    }
+    if (line.startsWith('/*')) continue;
+    if (line.startsWith('//*')) continue;
+    if (!line.startsWith('//')) { warnings.push(`L${ln}: non-JCL line ignored`); continue; }
+    const rest = line.slice(2);
+    if (rest.trim() === '') continue;
+    const firstTok = rest.trim().split(/\s+/)[0];
+    const looksLikeContinuation =
+      firstTok.includes('=') ||
+      firstTok.startsWith("'") ||
+      (statements.length > 0 && statements[statements.length - 1].operands.trim().endsWith(','));
+    if (looksLikeContinuation && !JCL_OPS.has(firstTok.toUpperCase())) {
+      const prev = statements[statements.length - 1];
+      if (prev && (prev.op === 'EXEC' || prev.op === 'DD' || prev.op === 'PROC' || prev.op === 'SET')) {
+        prev.operands += ' ' + rest.trim();
+        continue;
+      }
+      warnings.push(`L${ln}: orphan continuation ignored`);
+      continue;
+    }
+    const t = rest.trim().match(/^(\S+)(?:\s+(.*))?$/);
+    if (!t) continue;
+    let name = null, op = null, operands = t[2] || '';
+    if (JCL_OPS.has(t[1].toUpperCase())) {
+      op = t[1].toUpperCase();
+    } else {
+      name = t[1];
+      const t2 = operands.match(/^(\S+)\s*(.*)$/);
+      if (t2 && JCL_OPS.has(t2[1].toUpperCase())) {
+        op = t2[1].toUpperCase();
+        operands = t2[2] || '';
+      } else {
+        const prev = statements[statements.length - 1];
+        if (prev) { prev.operands += ' ' + rest.trim(); continue; }
+        warnings.push(`L${ln}: unrecognized statement ignored ("${t[1]}")`);
+        continue;
+      }
+    }
+    const st = { name, op, operands: operands.trim(), line: ln };
+    if (op === 'DD' && /^(\*|DATA\b)/.test(operands.trim())) inStreamData = true;
+    statements.push(st);
+  }
+  return statements;
+}
+
+function parseParams(operands){
+  const parts = [];
+  let depth = 0, quote = false, cur = '';
+  for (const ch of operands) {
+    if (quote) { cur += ch; if (ch === "'") quote = false; continue; }
+    if (ch === "'") { quote = true; cur += ch; continue; }
+    if (ch === '(') depth++;
+    if (ch === ')') depth--;
+    if (ch === ',' && depth === 0) { parts.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
+  }
+  if (cur.trim()) parts.push(cur.trim());
+  const out = {};
+  for (const p of parts) {
+    if (!p) continue;
+    const eq = p.indexOf('=');
+    if (eq > 0) out[p.slice(0, eq).toUpperCase()] = p.slice(eq + 1).replace(/^'|'$/g, '');
+    else out[p.toUpperCase()] = true;
+  }
+  return out;
+}
+
+function substitute(value, symbols){
+  if (typeof value !== 'string') return value;
+  const s = value.replace(/&([A-Z@$#][A-Z0-9@$#]*)/gi, (m, v) => {
+    const up = v.toUpperCase();
+    if (symbols[up] !== undefined && symbols[up] !== true) return symbols[up];
+    return m;
+  });
+  return s.replace(/\.\./g, '.');
+}
+
+function classifyUsage(p){
+  const disp = typeof p.DISP === 'string' ? p.DISP.toUpperCase() : 'SHR';
+  const first = disp.startsWith('(') ? disp.slice(1) : disp;
+  const head = first.split(/[,(]/)[0].trim();
+  if (head === '') return 'output';   // DISP=(,CATLG): omitted status = NEW
+  if (head === 'NEW' || head === 'MOD') return 'output';
+  if (head === 'SHR' || head === 'OLD') return 'input';
+  return 'unknown';
+}
+
+function buildDD(st, p, symbols){
+  const dd = { ddname: st.name, line: st.line };
+  if (p.DSN !== undefined) {
+    const dsn = substitute(p.DSN, symbols);
+    if (dsn.startsWith('&&')) {
+      dd.name = dsn.toUpperCase(); dd.temp = true; dd.usage = 'output';
+    } else {
+      const g = dsn.match(/^(.*)\(([-+]?\d+)\)$/);
+      if (g) { dd.name = g[1].toUpperCase(); dd.gdg = parseInt(g[2], 10); }
+      else dd.name = dsn.toUpperCase();
+      dd.usage = classifyUsage(p);
+    }
+  } else if (p.SYSOUT !== undefined) { dd.sysout = String(p.SYSOUT); dd.usage = 'output'; }
+  else if (p.DUMMY !== undefined) { dd.dummy = true; }
+  if (p.DISP !== undefined && typeof p.DISP === 'string') dd.disp = p.DISP.toUpperCase();
+  if (p.SPACE !== undefined) dd.space = String(p.SPACE);
+  return dd;
+}
+
+function linkProcs(result){
+  for (const job of result.jobs) {
+    const expanded = [];
+    for (const step of job.steps) {
+      if (step.kind !== 'PROC' || !step.target) { expanded.push(step); continue; }
+      const proc = result.procs[step.target];
+      if (!proc) {
+        step.resolved = false;
+        expanded.push(step);
+        result.warnings.push(`${job.name}: PROC ${step.target} not found (external cataloged proc?)`);
+        job.procsUsed.push(step.target);
+        continue;
+      }
+      step.resolved = true;
+      job.procsUsed.push(proc.name);
+      const symbols = { ...proc.defaults, ...step.symbols };
+      for (const ps of proc.steps) {
+        const copy = JSON.parse(JSON.stringify(ps));
+        copy.proc = proc.name;
+        copy.via = step.name;
+        for (const dd of copy.dds) {
+          if (dd.name) {
+            dd.name = substitute(dd.name, symbols);
+            if (dd.name.includes('&')) copy.hasUnresolvedSymbols = true;
+          }
+        }
+        for (const [ov, val] of Object.entries(step.overrides)) {
+          const parts = ov.split('.');
+          const ddname = parts.length >= 3 ? parts[1].toUpperCase() : parts[0].toUpperCase();
+          const param = (parts.length >= 3 ? parts.slice(2) : parts.slice(1)).join('.').toUpperCase();
+          const dd = copy.dds.find(d => (d.ddname || '').toUpperCase() === ddname);
+          if (dd) dd['ov_' + param] = val;
+        }
+        expanded.push(copy);
+      }
+    }
+    job.steps = expanded;
+  }
+}
+
+function parseJCL(text){
+  const warnings = [];
+  const stmts = tokenizeStatements(text, warnings);
+  const result = { jobs: [], procs: {}, warnings };
+  let job = null;
+  let procDef = null;
+  let condStack = [];
+  let globalSymbols = {};
+  for (const st of stmts) {
+    switch (st.op) {
+      case 'JOB':
+        job = { name: st.name, line: st.line, params: parseParams(st.operands), steps: [], procsUsed: [] };
+        result.jobs.push(job);
+        procDef = null; condStack = [];
+        break;
+      case 'SET':
+        Object.assign(globalSymbols, parseParams(st.operands));
+        break;
+      case 'PROC':
+        if (st.name) {
+          procDef = { name: st.name.toUpperCase(), defaults: parseParams(st.operands), steps: [] };
+          result.procs[procDef.name] = procDef;
+        }
+        break;
+      case 'PEND':
+        procDef = null;
+        break;
+      case 'EXEC': {
+        const p = parseParams(st.operands);
+        let kind = null, target = null;
+        if (p.PGM !== undefined) { kind = 'PGM'; target = p.PGM; }
+        else if (p.PROC !== undefined) { kind = 'PROC'; target = p.PROC; }
+        else {
+          const pos = Object.entries(p).find(([k, v]) => v === true && !EXEC_STD_PARAMS.has(k));
+          if (pos) { kind = 'PROC'; target = pos[0]; }
+          else warnings.push(`L${st.line}: EXEC without PGM or PROC`);
+        }
+        const step = {
+          name: st.name, line: st.line, kind,
+          condition: condStack.length ? condStack[condStack.length - 1] : null,
+          dds: [], overrides: {}, symbols: {},
+        };
+        if (target) step.target = substitute(String(target), globalSymbols).toUpperCase();
+        for (const [k, v] of Object.entries(p)) {
+          if (k === 'PGM' || k === 'PROC') continue;
+          if (k.includes('.')) step.overrides[k.toUpperCase()] = v;
+          else if (!EXEC_STD_PARAMS.has(k)) step.symbols[k] = v;
+        }
+        if (procDef) procDef.steps.push(step);
+        else if (job) job.steps.push(step);
+        else warnings.push(`L${st.line}: EXEC outside of job ignored`);
+        break;
+      }
+      case 'DD': {
+        const owner = procDef ? procDef.steps : (job ? job.steps : []);
+        const step = owner[owner.length - 1];
+        if (!step) { warnings.push(`L${st.line}: DD outside of step ignored`); break; }
+        step.dds.push(buildDD(st, parseParams(st.operands), globalSymbols));
+        break;
+      }
+      case 'IF':
+        condStack.push(st.operands.trim());
+        break;
+      case 'ELSE':
+        break;
+      case 'ENDIF':
+        condStack.pop();
+        break;
+      case 'INCLUDE':
+        warnings.push(`L${st.line}: INCLUDE not resolved (external file required)`);
+        break;
+      case 'JCLLIB':
+        result.jcllib = st.operands.trim();
+        break;
+      case 'OUTPUT': case 'COMMAND': case 'XMIT': case 'CNTL': case 'ENDCNTL': case 'EXPORT':
+        warnings.push(`L${st.line}: ${st.op} statement ignored (not needed for mapping)`);
+        break;
+      default:
+        warnings.push(`L${st.line}: unknown operation ${st.op}`);
+    }
+  }
+  linkProcs(result);
+  return result;
+}
+
 function parseFile(f){
   f.parsed = {};
   const t = f.text;
   if (f.lang === 'JCL'){
-    const steps = []; let m;
-    const re = /\/\/(\S+)\s+EXEC\s+PGM=([^\s,']+)/gi;
-    while ((m = re.exec(t))) steps.push({ name:m[1], pgm:m[2].toUpperCase() });
-    const dsns = [];
-    const re2 = /DSN=('?)([^\s',]+)/gi;
-    while ((m = re2.exec(t))) dsns.push(m[2].toUpperCase());
-    f.parsed = { steps, dsns:[...new Set(dsns)] };
+    const res = parseJCL(t);
+    // pas de carte JOB → pseudo-job au nom du fichier (même comportement qu'avant)
+    if (!res.jobs.length) res.jobs.push({ name: base(f.name), steps: [], procsUsed: [], params: {} });
+    res.jobs.forEach(jb => { jb.srcFile = f.name; });
+    f.parsed = { engine: 'v2', jobs: res.jobs, procs: res.procs, warnings: res.warnings };
   } else if (f.lang === 'CBL'){
     const pid = (t.match(/PROGRAM-ID[.]\s*([A-Z0-9\-]+)/i)||[])[1];
     const copies = []; let m;
@@ -284,13 +541,27 @@ function buildGraph(){
     if (from !== to && !seen.has(k)){ seen.add(k); g.edges.push({from,to}); }
   };
   state.files.forEach(f=>{
-    if (f.lang === 'JCL') g.jobs.push(f);
+    if (f.lang === 'JCL'){
+      // engine v2 : un fichier peut contenir plusieurs jobs — une entrée par job
+      const jobs = (f.parsed.jobs && f.parsed.jobs.length) ? f.parsed.jobs : [{ name: base(f.name), steps: [] }];
+      jobs.forEach(jb=>{
+        const steps = (jb.steps||[]).map(s => ({
+          name: s.name, pgm: s.target, kind: s.kind,
+          proc: s.proc || null, via: s.via || null, condition: s.condition || null,
+          dds: s.dds || []
+        }));
+        const dsns = [...new Set((jb.steps||[]).flatMap(s => (s.dds||[]))
+          .filter(d => d.name && !d.temp).map(d => String(d.name).toUpperCase()))];
+        g.jobs.push({ name: (jb.name || base(f.name)), file: f.name, lines: f.lines,
+          parsed: { steps, dsns, warnings: (f.parsed && f.parsed.warnings) || [] } });
+      });
+    }
     else if (f.lang === 'CBL') g.programs.push(f);
     else if (f.lang === 'CPY') g.copybooks.push(f);
   });
   g.jobs.forEach(j=>{
     const jid = base(j.name);
-    j.parsed.steps.forEach(s => addEdge(jid, s.pgm));
+    j.parsed.steps.forEach(s => { if (s.pgm) addEdge(jid, s.pgm); });
     j.parsed.dsns.forEach(d => { if(!g.datasets.includes(d)) g.datasets.push(d); addEdge(jid, d); });
   });
   g.programs.forEach(p=>{
@@ -311,6 +582,22 @@ function typeOf(label, g){
   if (g.copybooks.some(c=>base(c.name)===label)) return 'COPYBOOK';
   if (g.datasets.includes(label)) return 'DATASET';
   return 'UNKNOWN';
+}
+
+// Description lisible d'un step, calculée depuis ses DD réels (engine v2)
+function stepDesc(s){
+  if (!s.pgm) return 'EXEC — no PGM/PROC resolved (see Debug log)';
+  const parts = [ s.kind === 'PROC' ? `EXEC PROC=${esc(s.pgm)}` : `EXEC PGM=${esc(s.pgm)}` ];
+  const ins   = (s.dds||[]).filter(d => d.usage === 'input'  && d.name && !d.temp).map(d => esc(d.name));
+  const outs  = (s.dds||[]).filter(d => d.usage === 'output' && d.name && !d.temp)
+                 .map(d => esc(d.name) + (d.gdg != null ? ` (GDG ${d.gdg >= 0 ? '+' : ''}${d.gdg})` : ''));
+  const temps = (s.dds||[]).filter(d => d.temp).map(d => esc(d.name));
+  if (ins.length)   parts.push(`reads ${ins.join(', ')}`);
+  if (outs.length)  parts.push(`writes ${outs.join(', ')}`);
+  if (temps.length) parts.push(`temp ${temps.join(', ')}`);
+  if (s.proc) parts.push(`<span style="color:var(--purple)">from PROC ${esc(s.proc)}${s.via ? ' (via ' + esc(s.via) + ')' : ''}</span>`);
+  if (s.condition) parts.push(`<span style="color:var(--yellow)">if: ${esc(s.condition)}</span>`);
+  return parts.join(' · ');
 }
 
 // ══════════════════ 2. GESTION DES FICHIERS ══════════════════
@@ -361,9 +648,16 @@ function analyze(){
 function buildLog(){
   const L = []; const add = (cls,text)=>L.push({cls,text});
   add('info', `[parse] ${state.files.length} file(s) received — language auto-detected per file`);
+  if (state.files.some(f=>f.lang==='JCL'))
+    add('info', '[engine] JCL engine v2 — in-stream/cataloged PROCs, symbolic parameters, DISP I/O classification, GDG, temp datasets');
   state.files.forEach(f=>{
-    const why = f.lang==='JCL' ? 'EXEC/DD statements' : f.lang==='CBL' ? 'PROGRAM-ID found' : f.lang==='CPY' ? 'record layout' : 'unknown format';
+    const why = f.lang==='JCL' ? 'JCL statements (engine v2)' : f.lang==='CBL' ? 'PROGRAM-ID found' : f.lang==='CPY' ? 'record layout' : 'unknown format';
     add('ok', `[ok] ${f.name} → ${f.lang} (${why})`);
+    if (f.lang==='JCL' && f.parsed.warnings) f.parsed.warnings.forEach(w=>add('warn', `[v2] ${f.name}: ${w}`));
+    if (f.lang==='JCL' && f.parsed.jobs) f.parsed.jobs.forEach(jb=>{
+      if (jb.steps.length)
+        add('info', `[v2] ${jb.name}: ${jb.steps.length} step(s) resolved${(jb.procsUsed||[]).length ? ' · PROCs: ' + [...new Set(jb.procsUsed)].join(', ') : ''}`);
+    });
   });
   const g = buildGraph();
   g.programs.forEach(p=>p.parsed.copies.forEach(c=>{
@@ -371,7 +665,9 @@ function buildLog(){
       add('warn', `[warn] ${p.parsed.programId}: copybook ${c} not uploaded`);
   }));
   g.jobs.forEach(j=>j.parsed.steps.forEach(s=>{
-    if (!g.programs.some(p=>p.parsed.programId===s.pgm))
+    if (!s.pgm) return;
+    if (s.kind === 'PROC') add('warn', `[warn] ${base(j.name)}: PROC ${s.pgm} not uploaded — cannot be expanded`);
+    else if (!g.programs.some(p=>p.parsed.programId===s.pgm))
       add('warn', `[warn] ${base(j.name)}: external or unknown program ${s.pgm}`);
   }));
   add('info', `[done] ${g.jobs.length} job(s) · ${g.programs.length} program(s) · ${g.copybooks.length} copybook(s) · ${g.datasets.length} dataset(s)`);
@@ -472,8 +768,8 @@ const PANELS = {
         <h3>${base(j.name)} — job flow</h3>
         ${j.parsed.steps.length ? j.parsed.steps.map(s=>`
           <div class="step-body"><div class="step-head">//${esc(s.name)}</div>
-          <div class="step-sub">${s.desc ? esc(s.desc) : `EXEC PGM=${esc(s.pgm)}`}${g.programs.some(p=>p.parsed.programId===s.pgm) ? ' · <span style="color:var(--green)">✓ detected program</span>' : ' · <span style="color:var(--yellow)">external program</span>'}</div></div>`).join('')
-        : '<p class="note">No EXEC PGM step found in this job.</p>'}
+          <div class="step-sub">${stepDesc(s)}${s.kind === 'PGM' && s.pgm ? (g.programs.some(p=>p.parsed.programId===s.pgm) ? ' · <span style="color:var(--green)">✓ detected program</span>' : ' · <span style="color:var(--yellow)">external program</span>') : ''}</div></div>`).join('')
+        : '<p class="note">No EXEC step found in this job.</p>'}
         ${j.parsed.dsns.length ? `<p class="note">DD datasets: ${j.parsed.dsns.map(esc).join(' · ')}</p>` : ''}
       </div>`).join('');
   },
@@ -497,13 +793,28 @@ const PANELS = {
     if (!state.loaded) return emptyState('🗂','No data detected','JCL datasets, COBOL SELECT/FD files and data structures will appear here.');
     const g = buildGraph();
     if (!g.datasets.length) return emptyState('🗂','No dataset detected','Datasets are detected from JCL DD DSN= statements.');
+    const usage = {};
+    g.jobs.forEach(j=>j.parsed.steps.forEach(s=>(s.dds||[]).forEach(d=>{
+      if (!d.name) return;
+      const u = usage[d.name] = usage[d.name] || { in:false, out:false, gdg:false };
+      if (d.usage === 'input') u.in = true;
+      if (d.usage === 'output') u.out = true;
+      if (d.gdg != null) u.gdg = true;
+    })));
+    const uBadge = u => {
+      const b = [];
+      if (u.in)   b.push('<span class="pill" style="color:var(--cyan);border:1px solid var(--cyan)">INPUT</span>');
+      if (u.out)  b.push('<span class="pill" style="color:var(--green);border:1px solid var(--green)">OUTPUT</span>');
+      if (u.gdg)  b.push('<span class="pill" style="color:var(--purple);border:1px solid var(--purple)">GDG</span>');
+      return b.join(' ') || '<span class="pill pill-io">—</span>';
+    };
     return `<div class="card"><table class="tbl">
-      <tr><th>Dataset</th><th>Type</th><th>Referenced by</th></tr>
+      <tr><th>Dataset</th><th>Usage</th><th>Referenced by</th></tr>
       ${g.datasets.map(d=>{
         const jobs = g.jobs.filter(j=>j.parsed.dsns.includes(d)).map(j=>base(j.name)).join(', ');
-        return `<tr><td>${esc(d)}</td><td><span class="pill pill-io">DATASET</span></td><td>${esc(jobs||'—')}</td></tr>`;
+        return `<tr><td>${esc(d)}</td><td>${uBadge(usage[d] || {})}</td><td>${esc(jobs||'—')}</td></tr>`;
       }).join('')}
-    </table><p class="note">Input/Output classification, FD-level matching and lineage are computed by the full analyzer engine.</p></div>`;
+    </table><p class="note">Usage classified from DISP (NEW/MOD → output, SHR/OLD → input). FD-level matching and lineage are computed by the full analyzer engine.</p></div>`;
   },
 
   impact: () => {
@@ -815,19 +1126,12 @@ CAP-PARA.
 
 function loadSample(){
   state.files = JSON.parse(JSON.stringify(SAMPLE_FILES));
-  state.log = [
-    {cls:'info', text:'[parse] 4 files received — language auto-detected per file'},
-    {cls:'ok',   text:'[ok] PAYRUN0.JCL → JCL (EXEC/DD statements)'},
-    {cls:'ok',   text:'[ok] CBPAY100.CBL → COBOL (PROGRAM-ID found)'},
-    {cls:'ok',   text:'[ok] CBPAY200.CBL → COBOL (EXEC SQL detected)'},
-    {cls:'ok',   text:'[ok] PAYREC.CPY → Copybook'},
-    {cls:'warn', text:'[warn] STEP010: external program SORT'},
-    {cls:'info', text:'[done] 1 job · 2 programs · 3 datasets · 1 copybook · 2 SQL stmts'},
-  ];
+  state.files.forEach(f => { f.lines = f.text.split('\n').length; parseFile(f); });
   state.loaded = true;
   state.entity = null; state.srcFile = null; state.pySel = null;
   state.group = 'explore'; state.sub = 'map';
   document.getElementById('statusText').textContent = 'Sample system loaded';
+  buildLog();
   renderLeft(); renderNav(); renderContent();
 }
 
