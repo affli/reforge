@@ -242,7 +242,7 @@ function detectLang(name, text){
   if (ext === 'JCL') return 'JCL';
   if (ext === 'CPY' || ext === 'COPY') return 'CPY';
   if (/\bIDENTIFICATION DIVISION\b/.test(t) || /\bPROGRAM-ID\b/.test(t)) return 'CBL';
-  if (/^\s*\/\//m.test(t) && /\bEXEC\b/.test(t)) return 'JCL';
+  if (/^\s*\/\//m.test(t) && /\b(EXEC|PROC|JOB|DD)\b/.test(t)) return 'JCL';
   if (/\bPIC(TURE)?\s+[S9VX]/i.test(text) && !/\bPROCEDURE DIVISION\b/.test(t)) return 'CPY';
   if (/\b(DIVISION|SECTION)\b/.test(t)) return 'CBL';
   if (ext === 'CBL' || ext === 'COB' || ext === 'CB2') return 'CBL';
@@ -370,6 +370,9 @@ function buildDD(st, p, symbols){
     const dsn = substitute(p.DSN, symbols);
     if (dsn.startsWith('&&')) {
       dd.name = dsn.toUpperCase(); dd.temp = true; dd.usage = 'output';
+    } else if (dsn.startsWith('*.')) {
+      // référence arrière : DSN=*.STEP01.SORTOUT (temp passé d'un step à l'autre)
+      dd.name = dsn.toUpperCase(); dd.backref = true; dd.usage = classifyUsage(p);
     } else {
       const g = dsn.match(/^(.*)\(([-+]?\d+)\)$/);
       if (g) { dd.name = g[1].toUpperCase(); dd.gdg = parseInt(g[2], 10); }
@@ -508,13 +511,79 @@ function parseJCL(text){
   return result;
 }
 
+// ── Liaison globale : PROCs « catalogés » et PROCs imbriqués ──────────────
+// Le navigateur ne peut pas atteindre votre PROCLIB, mais si vous déposez vos
+// fichiers PROC à côté de vos JCL, ils sont résolus comme des procs catalogés.
+// Idempotent : appelé à chaque buildGraph, ne fait rien une fois tout résolu.
+function linkCatalogedProcs(){
+  const registry = {};
+  state.files.forEach(f=>{ if (f.lang === 'JCL' && f.parsed.procs) Object.assign(registry, f.parsed.procs); });
+  let changed = true, guard = 0;
+  while (changed && guard < 25){
+    changed = false; guard++;
+    state.files.forEach(f=>{
+      if (f.lang !== 'JCL' || !f.parsed.jobs) return;
+      f.parsed.jobs.forEach(jb=>{
+        for (let i = 0; i < jb.steps.length; i++){
+          const s = jb.steps[i];
+          if (s.kind !== 'PROC' || !s.target || s.resolved) continue;
+          if ((s.chain || []).includes(s.target)) continue; // récursion déjà signalée
+          const proc = registry[s.target];
+          if (!proc) continue;
+          if ((s.chain || []).length >= 10 || jb.steps.length > 200) continue; // garde-fou
+          s.resolved = true;
+          jb.procsUsed = jb.procsUsed || [];
+          jb.procsUsed.push(proc.name);
+          const symbols = { ...proc.defaults, ...s.symbols };
+          const copies = [];
+          for (const ps of proc.steps){
+            const copy = JSON.parse(JSON.stringify(ps));
+            copy.proc = proc.name;
+            copy.via = s.name;
+            copy.chain = [...(s.chain || []), proc.name];
+            for (const dd of copy.dds){
+              if (dd.name){
+                dd.name = substitute(dd.name, symbols);
+                if (dd.name.includes('&')) copy.hasUnresolvedSymbols = true;
+              }
+            }
+            for (const [ov, val] of Object.entries(s.overrides || {})){
+              const parts = ov.split('.');
+              const ddname = parts.length >= 3 ? parts[1].toUpperCase() : parts[0].toUpperCase();
+              const param = (parts.length >= 3 ? parts.slice(2) : parts.slice(1)).join('.').toUpperCase();
+              const dd = copy.dds.find(d => (d.ddname || '').toUpperCase() === ddname);
+              if (dd) dd['ov_' + param] = val;
+            }
+            copies.push(copy);
+          }
+          jb.steps.splice(i, 1, ...copies);
+          i += copies.length - 1;
+          changed = true;
+          // retire le warning obsolète « PROC … not found »
+          if (f.parsed.warnings) f.parsed.warnings = f.parsed.warnings.filter(w => !w.includes(`PROC ${s.target} not found`));
+        }
+      });
+    });
+  }
+  // signaler les appels récursifs restants
+  state.files.forEach(f=>{
+    if (f.lang !== 'JCL' || !f.parsed.jobs || !f.parsed.warnings) return;
+    f.parsed.jobs.forEach(jb=>jb.steps.forEach(s=>{
+      if (s.kind === 'PROC' && s.target && (s.chain || []).includes(s.target)
+          && !f.parsed.warnings.some(w => w.includes(`recursive PROC ${s.target}`)))
+        f.parsed.warnings.push(`recursive PROC call to ${s.target} detected — not expanded`);
+    }));
+  });
+}
+
 function parseFile(f){
   f.parsed = {};
   const t = f.text;
   if (f.lang === 'JCL'){
     const res = parseJCL(t);
-    // pas de carte JOB → pseudo-job au nom du fichier (même comportement qu'avant)
-    if (!res.jobs.length) res.jobs.push({ name: base(f.name), steps: [], procsUsed: [], params: {} });
+    // pas de JOB ni PROC → pseudo-job au nom du fichier ; fichier PROC-only → pas de pseudo-job
+    if (!res.jobs.length && !Object.keys(res.procs).length)
+      res.jobs.push({ name: base(f.name), steps: [], procsUsed: [], params: {} });
     res.jobs.forEach(jb => { jb.srcFile = f.name; });
     f.parsed = { engine: 'v2', jobs: res.jobs, procs: res.procs, warnings: res.warnings };
   } else if (f.lang === 'CBL'){
@@ -540,10 +609,12 @@ function buildGraph(){
     const k = from+'→'+to;
     if (from !== to && !seen.has(k)){ seen.add(k); g.edges.push({from,to}); }
   };
+  if (state.files.length) linkCatalogedProcs();
   state.files.forEach(f=>{
     if (f.lang === 'JCL'){
       // engine v2 : un fichier peut contenir plusieurs jobs — une entrée par job
-      const jobs = (f.parsed.jobs && f.parsed.jobs.length) ? f.parsed.jobs : [{ name: base(f.name), steps: [] }];
+      // (les fichiers PROC-only ne deviennent pas des pseudo-jobs)
+      const jobs = f.parsed.jobs || [];
       jobs.forEach(jb=>{
         const steps = (jb.steps||[]).map(s => ({
           name: s.name, pgm: s.target, kind: s.kind,
@@ -551,7 +622,7 @@ function buildGraph(){
           dds: s.dds || []
         }));
         const dsns = [...new Set((jb.steps||[]).flatMap(s => (s.dds||[]))
-          .filter(d => d.name && !d.temp).map(d => String(d.name).toUpperCase()))];
+          .filter(d => d.name && !d.temp && !d.backref).map(d => String(d.name).toUpperCase()))];
         g.jobs.push({ name: (jb.name || base(f.name)), file: f.name, lines: f.lines,
           parsed: { steps, dsns, warnings: (f.parsed && f.parsed.warnings) || [] } });
       });
@@ -654,6 +725,8 @@ function buildLog(){
     const why = f.lang==='JCL' ? 'JCL statements (engine v2)' : f.lang==='CBL' ? 'PROGRAM-ID found' : f.lang==='CPY' ? 'record layout' : 'unknown format';
     add('ok', `[ok] ${f.name} → ${f.lang} (${why})`);
     if (f.lang==='JCL' && f.parsed.warnings) f.parsed.warnings.forEach(w=>add('warn', `[v2] ${f.name}: ${w}`));
+    if (f.lang==='JCL' && f.parsed.procs && Object.keys(f.parsed.procs).length)
+      add('info', `[v2] ${f.name}: PROC definition(s) available: ${Object.keys(f.parsed.procs).join(', ')}`);
     if (f.lang==='JCL' && f.parsed.jobs) f.parsed.jobs.forEach(jb=>{
       if (jb.steps.length)
         add('info', `[v2] ${jb.name}: ${jb.steps.length} step(s) resolved${(jb.procsUsed||[]).length ? ' · PROCs: ' + [...new Set(jb.procsUsed)].join(', ') : ''}`);
@@ -1058,21 +1131,25 @@ function renderLeft(){
 // ══════════════════ 9. SAMPLE SYSTEM ══════════════════
 
 const SAMPLE_FILES = [
-  { name:'PAYRUN0.JCL', lang:'JCL', lines:23, sample:true,
+  { name:'PAYRUN0.JCL', lang:'JCL', lines:17, sample:true,
     text:`//PAYRUN0  JOB  (ACCT),'MONTHLY PAYROLL',CLASS=A,MSGCLASS=X
 //*--------------------------------------------------------------
 //* MONTHLY PAYROLL RUN — sample extract
 //*--------------------------------------------------------------
 //STEP010  EXEC PGM=SORT
-//SORTIN  DD DSN=PAYROLL.TRANS,DISP=SHR
-//SYSOUT  DD SYSOUT=*
+//SORTIN   DD DSN=PAYROLL.TRANS,DISP=SHR
+//SORTOUT  DD DSN=&&SORTED,DISP=(,PASS)
+//SYSOUT   DD SYSOUT=*
+//PAYPROC  PROC CYCLE=202610
 //STEP020  EXEC PGM=CBPAY100
-//TRANS   DD DSN=PAYROLL.TRANS,DISP=OLD
-//MASTER  DD DSN=BANK.CUST.MSTR,DISP=SHR
-//PAYMAST DD DSN=PAYROLL.MASTER,DISP=(,CATLG)
+//TRANS    DD DSN=*.STEP010.SORTOUT,DISP=OLD
+//MASTER   DD DSN=&CYCLE..CUST.MSTR,DISP=SHR
+//PAYMAST  DD DSN=PAYROLL.MASTER(+1),DISP=(,CATLG)
+//         PEND
+//S020     EXEC PAYPROC
 //STEP030  EXEC PGM=CBPAY200
-//PAYMAST DD DSN=PAYROLL.MASTER,DISP=OLD
-//SYSOUT  DD SYSOUT=*`,
+//PAYMAST  DD DSN=PAYROLL.MASTER,DISP=OLD
+//SYSOUT   DD SYSOUT=*`,
     parsed:{ steps:[
       {name:'STEP010', pgm:'SORT',    desc:'Sort PAYROLL.TRANS by account number'},
       {name:'STEP020', pgm:'CBPAY100', desc:'Compute gross pay · reads BANK.CUST.MSTR'},
