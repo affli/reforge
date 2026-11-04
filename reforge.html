@@ -199,7 +199,7 @@
       <input type="file" id="fileInput" multiple style="display:none">
       <span class="icon">📁</span>
       Drop your legacy files here<br>
-      JCL · COBOL · CPY — mixed together<br>
+      JCL · COBOL · CPY — or a Reforge project (.json)<br>
       or <span class="browse">browse files</span>
     </div>
     <button class="sample-btn" id="sampleBtn">⚡ Try with a sample system</button>
@@ -207,6 +207,7 @@
     <button class="clear-btn" id="clearAll" onclick="clearAllFiles()" style="display:none">Clear all files</button>
     <div class="stat-grid" id="stats"></div>
     <button class="analyze-btn" id="analyzeBtn" disabled>▶ Analyze</button>
+    <button class="analyze-btn" id="exportBtn" style="display:none;margin-top:8px">⬇ Export project (.json)</button>
   </aside>
 
   <main class="right">
@@ -679,6 +680,7 @@ async function handleFiles(fl){
   for (const f of arr){
     let text = '';
     try { text = await f.text(); } catch(e){}
+    if (isReforgeProject(f.name, text)){ await importProject(text); continue; }
     const lang = detectLang(f.name, text);
     const nf = { name:f.name, lang, text, lines:text.split('\n').length, sample:false };
     parseFile(nf);
@@ -687,6 +689,7 @@ async function handleFiles(fl){
     if (i>=0) state.files[i] = nf; else state.files.push(nf);
   }
   renderLeft();
+  saveSession();
   if (state.loaded) renderContent();
 }
 
@@ -694,7 +697,7 @@ function removeFile(i){
   state.files.splice(i,1);
   if (!state.files.length){ resetAll(); return; }
   if (state.srcFile && !state.files.some(f=>f.name===state.srcFile)) state.srcFile = state.files[0].name;
-  renderLeft(); renderContent();
+  renderLeft(); renderContent(); saveSession();
 }
 
 function clearAllFiles(){ resetAll(); }
@@ -704,6 +707,7 @@ function resetAll(){
   state.entity = null; state.srcFile = null; state.pySel = null;
   state.group = 'explore'; state.sub = 'map';
   document.getElementById('statusText').textContent = 'Ready';
+  clearSession();
   renderLeft(); renderNav(); renderContent();
 }
 
@@ -713,6 +717,7 @@ function analyze(){
   state.loaded = true;
   document.getElementById('statusText').textContent = 'Analysis complete';
   state.group = 'explore'; state.sub = 'map';
+  saveSession(); track('analyze');
   renderLeft(); renderNav(); renderContent();
 }
 
@@ -819,6 +824,110 @@ function keyStatusHTML(){
     <input class="key-input" id="apiKeyInput" type="password" placeholder="sk-ant-api03-…" autocomplete="off">
     <button class="key-btn" onclick="saveKey()">Save locally</button></div>
   <p class="note">Stored in your browser (localStorage) — never sent to our servers.</p>`;
+}
+
+// ══════════════════ 5c. PERSISTANCE LOCALE (IndexedDB) + PROJET ══════════════════
+// Les fichiers et l'analyse sont stockés dans le navigateur (IndexedDB),
+// jamais envoyés. Fallback mémoire si le stockage est bloqué (mode privé).
+// Export/import : fichier .json portable contenant uniquement les textes sources
+// (re-parsés à l'import — robuste aux évolutions du moteur).
+
+const SESSION_VER = 2;
+const _idbName = 'reforge-db', _idbStore = 'session';
+let _idb = null, _memSession = null;
+
+function idbOpen(){
+  return new Promise((res, rej) => {
+    if (_idb) return res(_idb);
+    try {
+      const req = indexedDB.open(_idbName, 1);
+      req.onupgradeneeded = () => { try { req.result.createObjectStore(_idbStore); } catch(e){} };
+      req.onsuccess = () => { _idb = req.result; res(_idb); };
+      req.onerror = () => rej(req.error || new Error('IndexedDB unavailable'));
+    } catch(e){ rej(e); }
+  });
+}
+
+async function saveSession(){
+  const data = { v: SESSION_VER, ts: Date.now(), files: state.files, log: state.log, loaded: state.loaded };
+  try {
+    const db = await idbOpen();
+    await new Promise((res, rej) => {
+      const tx = db.transaction(_idbStore, 'readwrite');
+      tx.objectStore(_idbStore).put(data, 'current');
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+    });
+    // demande au navigateur de ne pas évincer les données sous pression disque
+    if (navigator.storage && navigator.storage.persist) { try { navigator.storage.persist(); } catch(e){} }
+  } catch(e){ _memSession = data; } // mode privé / storage bloqué → mémoire de session
+}
+
+async function loadSession(){
+  try {
+    const db = await idbOpen();
+    return await new Promise((res, rej) => {
+      const rq = db.transaction(_idbStore, 'readonly').objectStore(_idbStore).get('current');
+      rq.onsuccess = () => res(rq.result || null);
+      rq.onerror = () => rej(rq.error);
+    });
+  } catch(e){ return _memSession; }
+}
+
+async function clearSession(){
+  _memSession = null;
+  try {
+    const db = await idbOpen();
+    await new Promise((res, rej) => {
+      const tx = db.transaction(_idbStore, 'readwrite');
+      tx.objectStore(_idbStore).delete('current');
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+    });
+  } catch(e){}
+}
+
+// ── Export / import de projet (.json) ──
+function exportProject(){
+  if (!state.files.length) return;
+  const data = { app: 'reforge', v: SESSION_VER, exported: new Date().toISOString(),
+    files: state.files.map(f => ({ name: f.name, lang: f.lang, text: f.text, sample: !!f.sample })) };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'reforge-project.json';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  track('export_project');
+}
+
+function isReforgeProject(name, text){
+  return /\.json$/i.test(name) && /"app"\s*:\s*"reforge"/.test((text || '').slice(0, 500));
+}
+
+async function importProject(text){
+  let data;
+  try { data = JSON.parse(text); } catch(e){ return false; }
+  if (!data || data.app !== 'reforge' || !Array.isArray(data.files)) return false;
+  state.files = [];
+  for (const f of data.files){
+    const t = f.text || '';
+    const nf = { name: f.name, lang: detectLang(f.name, t), text: t, lines: t.split('\n').length, sample: !!f.sample };
+    parseFile(nf);
+    state.files.push(nf);
+  }
+  state.loaded = true;
+  state.entity = null; state.srcFile = null; state.pySel = null;
+  state.group = 'explore'; state.sub = 'map';
+  document.getElementById('statusText').textContent = 'Project imported';
+  buildLog();
+  saveSession();
+  renderLeft(); renderNav(); renderContent();
+  track('import_project');
+  return true;
+}
+
+// ── Télémétrie légère (compteurs d'usage GA, jamais de noms de fichiers) ──
+function track(name){
+  try { if (typeof gtag === 'function') gtag('event', name); } catch(e){}
 }
 
 // ══════════════════ 6. PANNEAUX ══════════════════
@@ -1085,7 +1194,7 @@ total += gross_pay</div>
 
 function renderContent(){
   const c = document.getElementById('content');
-  c.innerHTML = PANELS[state.sub] ? PANELS[state.sub]() : emptyState('…','Coming soon','');
+  c.innerHTML = PANELS[state.sub] ? PANELSstate.sub : emptyState('…','Coming soon','');
 }
 
 // ══════════════════ 7. NAVIGATION ══════════════════
@@ -1119,6 +1228,7 @@ function renderLeft(){
       <button class="rm" title="Remove this file" onclick="removeFile(${i})">×</button>
     </div>`).join('');
   document.getElementById('clearAll').style.display = state.files.length ? 'block' : 'none';
+  document.getElementById('exportBtn').style.display = state.files.length ? 'block' : 'none';
   const g = buildGraph();
   document.getElementById('stats').innerHTML = state.files.length ?
     `<div class="stat"><b>${state.files.length}</b><span>Files</span></div>
@@ -1209,6 +1319,7 @@ function loadSample(){
   state.group = 'explore'; state.sub = 'map';
   document.getElementById('statusText').textContent = 'Sample system loaded';
   buildLog();
+  saveSession(); track('load_sample');
   renderLeft(); renderNav(); renderContent();
 }
 
@@ -1223,12 +1334,41 @@ fi.addEventListener('change', () => { handleFiles(fi.files); fi.value = ''; });
 dz.addEventListener('drop', e => { handleFiles(e.dataTransfer.files); });
 document.getElementById('sampleBtn').onclick = loadSample;
 document.getElementById('analyzeBtn').onclick = analyze;
+document.getElementById('exportBtn').onclick = exportProject;
 document.getElementById('themeBtn').onclick = () => {
   document.body.classList.toggle('light');
-  document.getElementById('themeBtn').textContent = document.body.classList.contains('light') ? '🌙' : '☀';
+  const light = document.body.classList.contains('light');
+  document.getElementById('themeBtn').textContent = light ? '🌙' : '☀';
+  try { localStorage.setItem('reforge_theme', light ? 'light' : 'dark'); } catch(e){}
 };
 
+// Thème persisté
+try {
+  if (localStorage.getItem('reforge_theme') === 'light'){
+    document.body.classList.add('light');
+    document.getElementById('themeBtn').textContent = '🌙';
+  }
+} catch(e){}
+
 renderLeft(); renderNav(); renderContent();
+
+// ── Restauration de session (IndexedDB) — « Welcome back » ──
+(async () => {
+  const saved = await loadSession();
+  if (saved && saved.v === SESSION_VER && Array.isArray(saved.files) && saved.files.length){
+    state.files = saved.files;
+    state.log = saved.log || [];
+    state.loaded = !!saved.loaded;
+    state.entity = null; state.srcFile = null; state.pySel = null;
+    if (state.loaded){
+      document.getElementById('statusText').textContent = `Welcome back — ${state.files.length} file(s) restored`;
+      track('restore_session');
+    } else {
+      document.getElementById('statusText').textContent = `${state.files.length} file(s) restored — click Analyze`;
+    }
+    renderLeft(); renderNav(); renderContent();
+  }
+})();
 </script>
 </body>
 </html>
