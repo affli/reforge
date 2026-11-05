@@ -170,13 +170,7 @@
 
   ::-webkit-scrollbar{width:9px;height:9px} ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:5px} ::-webkit-scrollbar-track{background:transparent}
 </style>
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-TMZLXLY7BC"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-  gtag('config', 'G-TMZLXLY7BC');
-</script>
+<!-- Télémétrie Google Analytics : désactivée par défaut. Opt-in via Debug → bouton Telemetry. Aucun chargement externe avant consentement explicite. -->
 </head>
 <body>
 
@@ -231,7 +225,7 @@ const NAV = [
   { id:'tech',      icon:'🛠', label:'Tech',      subs:[ {id:'source',label:'Source'}, {id:'copybooks',label:'Copybooks'}, {id:'debug',label:'Debug'} ] },
 ];
 
-const state = { files:[], loaded:false, log:[], group:'explore', sub:'map', entity:null, srcFile:null, pySel:null };
+const state = { files:[], loaded:false, log:[], group:'explore', sub:'map', entity:null, srcFile:null, pySel:null, srcIdx:null, _model:null, _testResults:null };
 
 // ══════════════════ 1. DÉTECTION & PARSING (réel) ══════════════════
 
@@ -356,7 +350,9 @@ function substitute(value, symbols){
 }
 
 function classifyUsage(p){
-  const disp = typeof p.DISP === 'string' ? p.DISP.toUpperCase() : 'SHR';
+  // pas de DISP → on n'invente pas un usage : 'unknown' + avertissement en aval
+  if (p.DISP === undefined || typeof p.DISP !== 'string') return 'unknown';
+  const disp = p.DISP.toUpperCase();
   const first = disp.startsWith('(') ? disp.slice(1) : disp;
   const head = first.split(/[,(]/)[0].trim();
   if (head === '') return 'output';   // DISP=(,CATLG): omitted status = NEW
@@ -427,12 +423,41 @@ function linkProcs(result){
   }
 }
 
-function parseJCL(text){
+// INCLUDE MEMBER=X : si le membre est uploadé (fichier JCL du projet), ses
+// instructions sont splicées dans le flux — sinon warning précis, jamais deviné.
+function resolveIncludes(stmts, members, stack, warns){
+  const out = [];
+  for (const st of stmts){
+    if (st.op !== 'INCLUDE'){ out.push(st); continue; }
+    const p = parseParams(st.operands);
+    let member = null;
+    if (typeof p.MEMBER === 'string' && p.MEMBER) member = p.MEMBER.trim().toUpperCase();
+    else {
+      const raw = st.operands.trim();
+      const dn = raw.match(/\(([^()]+)\)\s*$/); // INCLUDE DSN=X.Y(NAME) ou MEMBER=X.Y(NAME)
+      member = dn ? dn[1].toUpperCase() : raw.split(/\s+/)[0].toUpperCase();
+    }
+    if (!member){ warns.push(`L${st.line}: INCLUDE without member name — ignored`); continue; }
+    if (stack.includes(member)){ warns.push(`L${st.line}: INCLUDE ${member} circular — skipped`); continue; }
+    if (stack.length >= 5){ warns.push(`L${st.line}: INCLUDE nesting deeper than 5 — stopped`); continue; }
+    const text = members[member];
+    if (text == null){
+      warns.push(`L${st.line}: INCLUDE member ${member} not uploaded — statements not available`);
+      out.push(st);
+      continue;
+    }
+    out.push(...resolveIncludes(tokenizeStatements(text, warns), members, stack.concat(member), warns));
+  }
+  return out;
+}
+
+function parseJCL(text, members){
   const warnings = [];
-  const stmts = tokenizeStatements(text, warnings);
+  const stmts = resolveIncludes(tokenizeStatements(text, warnings), members || {}, [], warnings);
   const result = { jobs: [], procs: {}, warnings };
   let job = null;
   let procDef = null;
+  let procStack = [];
   let condStack = [];
   let globalSymbols = {};
   for (const st of stmts) {
@@ -440,19 +465,24 @@ function parseJCL(text){
       case 'JOB':
         job = { name: st.name, line: st.line, params: parseParams(st.operands), steps: [], procsUsed: [] };
         result.jobs.push(job);
-        procDef = null; condStack = [];
+        procDef = null; procStack = []; condStack = [];
         break;
       case 'SET':
         Object.assign(globalSymbols, parseParams(st.operands));
         break;
       case 'PROC':
         if (st.name) {
+          // PROC imbriqués in-stream : pile de définitions, PEND restaure le parent
+          procStack.push(procDef);
           procDef = { name: st.name.toUpperCase(), defaults: parseParams(st.operands), steps: [] };
           result.procs[procDef.name] = procDef;
+        } else if (job) {
+          // PROC sans nom (JOB statement) : defaults symboliques pour ce job
+          Object.assign(globalSymbols, parseParams(st.operands));
         }
         break;
       case 'PEND':
-        procDef = null;
+        procDef = procStack.pop() || null;
         break;
       case 'EXEC': {
         const p = parseParams(st.operands);
@@ -466,7 +496,7 @@ function parseJCL(text){
         }
         const step = {
           name: st.name, line: st.line, kind,
-          condition: condStack.length ? condStack[condStack.length - 1] : null,
+          condition: condStack.length ? { ...condStack[condStack.length - 1] } : null,
           dds: [], overrides: {}, symbols: {},
         };
         if (target) step.target = substitute(String(target), globalSymbols).toUpperCase();
@@ -488,15 +518,16 @@ function parseJCL(text){
         break;
       }
       case 'IF':
-        condStack.push(st.operands.trim());
+        condStack.push({ text: st.operands.trim().replace(/\s+THEN\s*$/i,''), neg: false });
         break;
       case 'ELSE':
+        if (condStack.length) condStack[condStack.length - 1].neg = true;
         break;
       case 'ENDIF':
         condStack.pop();
         break;
       case 'INCLUDE':
-        warnings.push(`L${st.line}: INCLUDE not resolved (external file required)`);
+        // déjà traité par resolveIncludes : membre splicé si uploadé, warning précis sinon
         break;
       case 'JCLLIB':
         result.jcllib = st.operands.trim();
@@ -577,29 +608,1044 @@ function linkCatalogedProcs(){
   });
 }
 
+// ══════════════════ 1b. COBOL ENGINE v3 ══════════════════
+// Vrai parseur COBOL : format fixe/libre, divisions/sections/paragraphes,
+// SELECT ASSIGN, niveaux de données (PIC/OCCURS/REDEFINES/VALUE), COPY
+// imbriqués (+REPLACING), PERFORM/THRU, CALL (littéral + dynamique résolu),
+// GO TO (y compris dans IF), READ/WRITE/REWRITE/OPEN, blocs EXEC SQL.
+// Tout ce qui n'est pas reconnu produit un avertissement — aucune
+// dépendance n'est jamais inventée.
+
+function tkWords(s){ return s.replace(/,+$/,'').trim().split(/\s+/).filter(Boolean); }
+
+function cobDetectFixed(raw){
+  const lines = raw.split(/\r?\n/);
+  let seq = 0, ind = 0, col8 = 0, nonEmpty = 0;
+  for (const l of lines){
+    if (!l.trim()) continue;
+    nonEmpty++;
+    if (/^[0-9]{3,6}(\s|$)/.test(l)) seq++;
+    if (l.length > 7 && /^[0-9 ]{6}[*\-\/Dd]/.test(l.slice(0,7))) ind++;
+    const first = l.search(/\S/);
+    if (first >= 7) col8++;
+  }
+  if (!nonEmpty) return false;
+  return (seq / nonEmpty >= 0.5) || (ind / nonEmpty >= 0.5) || (col8 / nonEmpty >= 0.6);
+}
+
+function cobLogicalItems(text, warns){
+  const lines = text.split(/\r?\n/);
+  // détection UNE fois pour tout le fichier : en format libre, une entrée
+  // indentée "    05  X PIC 9." ne doit pas être confondue avec une zone de
+  // séquence fixe — sinon le niveau de données serait avalé.
+  const fixed = cobDetectFixed(text);
+  const items = [];
+  let inSql = false, sqlBuf = [], sqlStart = 0;
+  let litOpen = false; // littérale encore ouverte en fin de ligne (continuation '-')
+  for (let i = 0; i < lines.length; i++){
+    const orig = lines[i];
+    let l = orig;
+    let ind = '';
+    if (fixed){
+      // format fixe : zone de séquence (col 1-6) + indicatif (col 7), troncature à 72
+      ind = l.length > 6 ? l[6] : ' ';
+      if (ind === '*' || ind === '/') continue; // ligne de commentaire
+      if (ind === '-') l = '       ' + l.slice(7); // continuation : zone A ignorée
+      else l = l.slice(7);
+      if (l.length > 72) l = l.slice(0, 72);
+      if (orig.length > 72 && warns) warns.push(`line ${i+1}: statement beyond column 72 truncated (fixed format)`);
+    } else if (l.length > 80){
+      if (warns) warns.push(`line ${i+1}: very long line — free format assumed, not truncated`);
+    }
+    // commentaire flottant *> (COBOL 2002+) — supprimé hors littérale
+    {
+      let q = false;
+      for (let ci = 0; ci < l.length - 1; ci++){
+        const ch = l[ci];
+        if (ch === "'") q = !q;
+        else if (!q && ch === '*' && l[ci+1] === '>'){ l = l.slice(0, ci).trim(); break; }
+      }
+    }
+    if (!l.trim()) continue;
+    if (inSql){
+      sqlBuf.push(l);
+      if (/\bEND-EXEC\b/i.test(l)){
+        items.push({ t: 'sql', text: sqlBuf.join(' '), ln: sqlStart });
+        inSql = false; sqlBuf = [];
+      }
+      continue;
+    }
+    if (/^\s*EXEC\s+SQL\b/i.test(l)){
+      if (/\bEND-EXEC\b/i.test(l)){
+        items.push({ t: 'sql', text: l, ln: i+1 });
+      } else {
+        inSql = true; sqlBuf = [l]; sqlStart = i+1;
+      }
+      continue;
+    }
+    // continuation de littérale (col 7 '-') : la chaîne reprend au guillemet
+    // SANS espace inséré — sinon 'ABC' continuée par 'DEF' serait corrompue
+    if (fixed && ind === '-' && litOpen && items.length && items[items.length-1].t === 'line'){
+      const last = items[items.length-1];
+      const cm = l.trim().match(/^'(.*)$/);
+      if (cm) last.text = last.text.replace(/\s+$/,'') + cm[1];
+      else last.text += ' ' + l.trim();
+    } else {
+      items.push({ t: 'line', text: l, ln: i+1 });
+    }
+    {
+      const lc = items.length && items[items.length-1].t === 'line' ? items[items.length-1].text : '';
+      litOpen = (lc.match(/'/g) || []).length % 2 === 1;
+    }
+  }
+  if (inSql && warns) warns.push(`line ${sqlStart}: EXEC SQL block without END-EXEC`);
+  return { items, fixedHint: lines.some(l => /^[0-9]{3,6}(\s|$)/.test(l)) };
+}
+
+function cobSentences(items){
+  const out = [];
+  let buf = [], start = null;
+  const endsWithPeriod = s => /\.\s*$/.test(s);
+  for (const it of items){
+    if (it.t === 'sql'){ out.push({ t:'sql', text: it.text, ln: it.ln }); continue; }
+    if (start === null) start = it.ln;
+    // continuation : une ligne ne finissant pas par un verbe/keyword connu à moitié est jointe à la suivante
+    buf.push(it.text.trim());
+    const joined = buf.join(' ');
+    if (endsWithPeriod(joined)){
+      out.push({ t:'sentence', text: joined, ln: start });
+      buf = []; start = null;
+    }
+  }
+  if (buf.length){
+    const joined = buf.join(' ');
+    if (/\.\s*$/.test(joined)) out.push({ t:'sentence', text: joined, ln: start });
+    else out.push({ t:'sentence', text: joined + '.', ln: start, incomplete: true });
+  }
+  return out;
+}
+
+function parseReplacing(s){
+  // COPY X REPLACING ==A== BY ==B==  |  A BY B  |  LEADING/TRAILING ==A== BY ==B==
+  const pairs = [];
+  const re = /(LEADING|TRAILING)?\s*(?:==([^=]+)==|\b([A-Z0-9][A-Z0-9\-]*)\b)\s+BY\s+(?:==([^=]+)==|\b([A-Z0-9][A-Z0-9\-]*)\b)/gi;
+  let m;
+  while ((m = re.exec(s))){
+    const from = (m[2] !== undefined ? m[2] : (m[3] || '')).toUpperCase().trim();
+    const to = (m[4] !== undefined ? m[4] : (m[5] || '')).toUpperCase().trim();
+    if (from) pairs.push({ from, to, mode: (m[1] || '').toUpperCase() });
+  }
+  return pairs;
+}
+function applyReplacing(t, pairs){
+  for (const p of pairs){
+    const a = p.from.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    try {
+      if (p.mode === 'LEADING') t = t.replace(new RegExp('\\b' + a, 'gi'), p.to);
+      else if (p.mode === 'TRAILING') t = t.replace(new RegExp(a + '\\b', 'gi'), p.to);
+      else t = t.replace(new RegExp('\\b' + a + '\\b', 'gi'), p.to);
+    } catch(e){ /* pattern invalide → texte original conservé */ }
+  }
+  return t;
+}
+
+function expandCopies(sents, registry, ctx, stack){
+  const out = [];
+  for (const sn of sents){
+    if (sn.t !== 'sentence'){ out.push(sn); continue; }
+    const cm = sn.text.match(/^COPY\s+([A-Z0-9\-]+)\s*(.*?)\.\s*$/i);
+    if (!cm){ out.push(sn); continue; }
+    const bname = cm[1].toUpperCase();
+    const book = registry[bname] || registry[bname.replace(/^-/,'')];
+    if (!book){
+      ctx.warns.push(`line ${sn.ln}: COPY ${bname} not uploaded — layout unknown`);
+      ctx.copyUsed.push({ name: bname, resolved: false, ln: sn.ln, file: ctx.file });
+      out.push(sn); // garder la phrase COPY pour trace
+      continue;
+    }
+    if (stack.includes(bname)){
+      ctx.warns.push(`line ${sn.ln}: COPY ${bname} circular reference — skipped`);
+      continue;
+    }
+    if (stack.length >= 10){
+      ctx.warns.push(`line ${sn.ln}: COPY nesting deeper than 10 — stopped`);
+      continue;
+    }
+    ctx.copyUsed.push({ name: bname, resolved: true, ln: sn.ln, file: ctx.file });
+    let btext = book.text;
+    const pairs = parseReplacing(cm[2]);
+    if (pairs.length) btext = applyReplacing(btext, pairs);
+    const sub = expandCopies(cobSentences(cobLogicalItems(btext, ctx.warns).items).filter(s=>s.t!=='sql'), registry, ctx, stack.concat(bname));
+    out.push({ t:'sentence', text: sn.text, ln: sn.ln, copy: bname });
+    sub.forEach(s => { if (s.t==='sentence' && s.copy !== undefined) out.push(s); else out.push(s); });
+  }
+  return out;
+}
+
+const SQLKW = new Set(['SELECT','INSERT','UPDATE','DELETE','FROM','WHERE','SET','INTO','VALUES','JOIN','INNER','LEFT','RIGHT','OUTER','ON','AND','OR','NOT','IN','BETWEEN','LIKE','ORDER','GROUP','BY','AS','DISTINCT','UNION','ALL','CURSOR','FOR','FETCH','DECLARE','OPEN','CLOSE','WITH','HAVING','EXISTS','CASE','WHEN','THEN','END','TABLE','CREATE','DROP','ALTER','INDEX','VIEW','COUNT','SUM','AVG','MIN','MAX','CURRENT','TIMESTAMP','DATE','SCHEMA','COMMIT','ROLLBACK','WHENEVER','NOT','FOUND','SQLSTATE','SQLCODE','WITH','HOLD','SQLEXCEPTION','SQLWARNING']);
+
+function sqlTables(st){
+  // st = texte d'un bloc EXEC SQL (sans le préfixe) → tables référencées
+  const text = st.replace(/^\s*EXEC\s+SQL/i,'').replace(/\bEND-EXEC\b\.?\s*$/i,'');
+  const upper = text.toUpperCase();
+  const tabs = new Set();
+  // noms de CTE (WITH X AS (...)) : ce ne sont pas des tables — exclus des résultats
+  const ctes = new Set();
+  const cteRe = /(?:\bWITH\b|,)\s*([A-Z0-9\-]+)\s+AS\s*\(/g;
+  let cm2;
+  while ((cm2 = cteRe.exec(upper))) ctes.add(cm2[1]);
+  const pushList = (s) => {
+    s.split(',').forEach(x => {
+      const t = x.trim();
+      if (!t) return;
+      const q = t.match(/^"([^"]+)"/); // identifiant entre guillemets ("MY TABLE")
+      if (q){ tabs.add(q[1].trim().toUpperCase()); return; }
+      const w = t.split(/\s+/)[0];
+      const clean = w.replace(/[(),;]/g,'');
+      if (clean && !SQLKW.has(clean) && !ctes.has(clean) && !clean.startsWith(':') && !/^&/.test(clean)) tabs.add(clean);
+    });
+  };
+  // FROM t1, t2 alias / JOIN t / INTO t / UPDATE t
+  const anchors = ['FROM','INTO','UPDATE','JOIN','TABLE'];
+  const re = /\b(FROM|INTO|UPDATE|JOIN|TABLE)\b/g;
+  let m;
+  while ((m = re.exec(upper))){
+    const after = upper.slice(m.index + m[0].length).trim();
+    // s'arrêter au premier keyword SQL suivant
+    let seg = after;
+    const kwRe = /\b(SELECT|WHERE|SET|ON|JOIN|INNER|LEFT|RIGHT|OUTER|VALUES|FOR|WITH|AS|END-EXEC)\b/;
+    const km = seg.match(kwRe);
+    if (km) seg = seg.slice(0, km.index);
+    pushList(seg);
+  }
+  return [...tabs];
+}
+
+function sqlParse(C, s){
+  const raw = s.text.replace(/^\s*EXEC\s+SQL/i,'').replace(/\bEND-EXEC\b\.?\s*$/i,'');
+  const U = raw.toUpperCase();
+  const first = tkWords(U)[0];
+  // instructions sans accès aux données : pas d'arête, pas de bruit
+  if (['INCLUDE','WHENEVER','COMMIT','ROLLBACK','CONNECT','SET','FETCH','OPEN','CLOSE'].includes(first)){
+    C.sql.push({ op: 'other', tables: [], ln: s.ln, text: raw.trim().slice(0, 200) });
+    return;
+  }
+  if (first === 'PREPARE' || first === 'EXECUTE'){
+    // SQL dynamique : le texte de la requête est inconnu → 0 table, aucun faux positif
+    C.sql.push({ op: 'dynamic', tables: [], ln: s.ln, text: raw.trim().slice(0, 200) });
+    C.warns.push(`line ${s.ln}: dynamic SQL (${first}) — statement text unknown, tables NOT extracted (no false positive)`);
+    return;
+  }
+  let op = null;
+  if (first === 'DECLARE'){
+    const cm = U.match(/\bCURSOR\s+FOR\s+(SELECT|INSERT|UPDATE|DELETE|MERGE)\b/);
+    if (!cm){
+      // DECLARE X TABLE / déclarations de variables hôtes : pas un accès aux données
+      C.sql.push({ op: 'other', tables: [], ln: s.ln, text: raw.trim().slice(0, 200) });
+      return;
+    }
+    op = cm[1];
+  } else if (['SELECT','INSERT','UPDATE','DELETE','MERGE'].includes(first)) op = first;
+  // normalisation des opérations : SELECT→read, INSERT/DELETE→write, UPDATE/MERGE→update
+  if (op === 'SELECT') op = 'read';
+  else if (op === 'INSERT' || op === 'DELETE') op = 'write';
+  else if (op === 'UPDATE' || op === 'MERGE') op = 'update';
+  if (op === null && /\bSELECT\b/.test(U)) op = 'read';
+  const tabs = sqlTables(s.text);
+  C.sql.push({ op: op || 'unknown', tables: tabs, ln: s.ln, text: raw.trim().slice(0, 200) });
+  if (!op)
+    C.warns.push(`line ${s.ln}: EXEC SQL statement type not recognized (${first || '?'}) — tables still extracted, no typed edge created`);
+}
+
+const IDENT = /^[A-Z0-9][A-Z0-9\-]*$/;
+
+function levelEntry(C, w, ln, sec, fd){
+  // 01  NAME  PIC 9(4)V99 [OCCURS n] [REDEFINES X] [VALUE lit].
+  const lvl = w[0];
+  const name = (w[1]||'').toUpperCase();
+  const rest = w.slice(2).join(' ');
+  const picm = rest.match(/\bPIC(?:TURE)?\s+(?:IS\s+)?([A-Z0-9SVX\.\(\)\+\-,\$*\-\/]+(?:\s+[A-Z0-9SVX\.\(\)\+\-,\$*\-\/]+)*)/i);
+  const pic = picm ? picm[1].replace(/\s+/g,'') : null;
+  const occm = rest.match(/\bOCCURS\s+(\d+)\s*(?:TIMES)?/i);
+  const redm = rest.match(/\bREDEFINES\s+([A-Z0-9\-]+)/i);
+  const valm = rest.match(/\bVALUE\s+(?:IS\s+)?['"]?([^'"\s.]+)/i);
+  const v = { level: parseInt(lvl,10), name: name || 'FILLER', pic, occurs: occm?parseInt(occm[1],10):null, redefines: redm?redm[1].toUpperCase():null, value: valm?valm[1]:null, fd: fd || null, sec, ln, is88: lvl === '88' };
+  C.vars.push(v);
+  if (lvl === '88' && valm) (C.varLits[name] = C.varLits[name] || []).push(valm[1].toUpperCase());
+  if (!pic && lvl !== '88' && !redm && name && name !== 'FILLER' && !/\bPIC\b|\bOCCURS\b/i.test(rest) && !w.slice(1).some(x=>/^(COMP|BINARY|PACKED|USAGE|SYNC|JUST|JUSTIFIED|BLANK|GLOBAL|EXTERNAL)$/i.test(x)))
+    ; // groupe sans PIC : légitime (01 RECORD. / 05 SUB-GROUP.)
+}
+
+function procSentence(C, t, s, para, opAdd){
+  const ln = s.ln;
+  // Le point final de la phrase est retiré : GO TO CAP-PARA. doit donner
+  // la cible "CAP-PARA" (valide IDENT) et non "CAP-PARA."
+  const U = t.toUpperCase().replace(/\.\s*$/, '');
+  // Littérales neutralisées pour la détection de verbes : un verbe écrit
+  // DANS une chaîne (MOVE 'READ X' TO Y) ne doit jamais créer de relation.
+  const UQ = U.replace(/'[^']*'/g, "''");
+  // I/O : scannés dans TOUTE la phrase — les phrases multi-verbes sont
+  // courantes en COBOL (READ X AT END MOVE 'Y' TO EOF ... END-PERFORM.)
+  let m;
+  const rre = /\bREAD\s+([A-Z0-9\-]+)/g;
+  while ((m = rre.exec(UQ))) opAdd(m[1], 'read', ln);
+  const wre = /\bWRITE\s+([A-Z0-9\-]+)/g;
+  while ((m = wre.exec(UQ))) opAdd(m[1], 'write', ln);
+  const rwre = /\bREWRITE\s+([A-Z0-9\-]+)/g;
+  while ((m = rwre.exec(UQ))) opAdd(m[1], 'update', ln);
+  const dre = /\bDELETE\s+([A-Z0-9\-]+)/g;
+  while ((m = dre.exec(UQ))) opAdd(m[1], 'delete', ln);
+  const ore = /\bOPEN\s+(INPUT|OUTPUT|I-O|EXTEND)\s+([A-Z0-9\-]+)/g;
+  while ((m = ore.exec(UQ))) opAdd(m[2], m[1] === 'INPUT' ? 'read' : m[1] === 'OUTPUT' ? 'write' : 'update', ln);
+  // MOVE 'lit' TO var → valeur possible pour un CALL dynamique (première valeur vue)
+  const mre = /MOVE\s+'([^']*)'\s+TO\s+([A-Z0-9\-]+)/gi;
+  while ((m = mre.exec(t))){
+    const nm = m[2].toUpperCase();
+    if (C.varLits[nm] === undefined) C.varLits[nm] = [m[1].toUpperCase()];
+  }
+  // PERFORM : toutes les occurrences dans la phrase — une phrase sans point
+  // peut enchaîner READ ... PERFORM X ... GO TO Y (code réel). Formes inline
+  // (PERFORM UNTIL / WITH TEST / VARYING / n TIMES) → aucune arête inventée.
+  const PKW = /^(UNTIL|VARYING|WITH|TEST|TIMES)$/;
+  const pre = /(?:^|[^A-Z0-9\-])(?:PERFORM|PERFORMS)\s+([A-Z0-9\-]+)(?:\s+(?:THRU|THROUGH)\s+([A-Z0-9\-]+))?/g;
+  while ((m = pre.exec(UQ))){
+    const to = m[1];
+    if (PKW.test(to) || /^[0-9]+$/.test(to)) continue;
+    C.performs.push({ from: para, to, thru: m[2] || null, ln });
+  }
+  // GO TO / GOTO : toutes les occurrences. GO TO A B C DEPENDING ON X →
+  // une arête par cible (branchement dynamique, confiance 'probable').
+  // GO TO au milieu d'une phrase (IF ... GO TO X) → embedded.
+  const ggre = /(?:^|[^A-Z0-9\-])(?:GO\s+TO|GOTO)\s+/g;
+  while ((m = ggre.exec(UQ))){
+    const rest = UQ.slice(m.index + m[0].length).trim().split(/\s+/);
+    const w2 = rest[0];
+    if (!w2 || !IDENT.test(w2) || /^DEPENDING$/i.test(w2)) continue;
+    const embedded = m.index > 0;
+    const di = rest.findIndex(x => /^DEPENDING/i.test(x));
+    if (di > 0){
+      rest.slice(0, di).filter(x => IDENT.test(x))
+        .forEach(t2 => C.gotos.push({ from: para, to: t2, ln, depending: true, embedded, src: rest.slice(0, di).join(' ') }));
+    } else {
+      C.gotos.push({ from: para, to: w2, ln, embedded });
+    }
+  }
+  // CALL : littéral direct ('PGM') → certain ; variable (CALL WS-PGM) →
+  // résolution dynamique via varLits dans resolveCalls
+  const cre = /(?:^|[^A-Z0-9\-])CALL\s+'([^']+)'/g;
+  while ((m = cre.exec(U))) C.calls.push({ target: m[1].toUpperCase(), viaVar: null, resolved: true, ln });
+  const cvre = /(?:^|[^A-Z0-9\-])CALL\s+([A-Z0-9\-]+)/g;
+  while ((m = cvre.exec(UQ))) C.calls.push({ target: null, viaVar: m[1].toUpperCase(), resolved: false, ln });
+}
+
+function resolveOps(C){
+  // record 01 ↔ fichier FD : association par CONTEXTE (le FD courant au moment
+  // de la déclaration), pas par homonymie. WRITE/REWRITE opèrent sur le NOM DE
+  // RECORD, READ/OPEN/DELETE sur le nom de FICHIER — les deux doivent aboutir
+  // au même fichier SELECT/FD. Tout I/O non rattaché est signalé, jamais deviné.
+  const recToFile = {};
+  C.selects.forEach(sl => { recToFile[sl.file] = sl.file; });
+  for (const v of C.vars){
+    if (v.fd) recToFile[v.name] = v.fd;
+  }
+  C.fileOps = C.fileOps || {};
+  const merged = {};
+  for (const [rec, ops] of Object.entries(C.fileOps)){
+    const file = recToFile[rec] || null;
+    if (!file){
+      C.warns.push(`line ${ops[0].ln}: I/O on "${rec}" not attached to any SELECT/FD — relation NOT created (nothing invented)`);
+      continue;
+    }
+    merged[file] = merged[file] || [];
+    ops.forEach(o => { if (!merged[file].some(x => x.op === o.op)) merged[file].push(o); });
+  }
+  C.fileOps = merged;
+  C.recToFile = recToFile;
+}
+
+function resolveCalls(C){
+  C.calls.forEach(c => {
+    if (!c.resolved && c.viaVar){
+      const lits = C.varLits[c.viaVar];
+      if (lits && lits.length){
+        c.target = lits[0];
+        c.resolved = 'var';
+      }
+    }
+  });
+}
+
+function parseCOBOL(file, text, registry){
+  const C = { file, programId: null, divisions: [], sections: [], paragraphs: [], vars: [], selects: [],
+    fds: [], performs: [], gotos: [], calls: [], sql: [], fileOps: {}, varLits: {}, copyUsed: [], warns: [] };
+  const li = cobLogicalItems(text, C.warns);
+  C.fixed = cobDetectFixed(text);
+  const sents0 = cobSentences(li.items);
+  const ctx = { file, warns: C.warns, copyUsed: C.copyUsed };
+  const sents = expandCopies(sents0, registry, ctx, []);
+
+  let div = null, sec = null, para = null, curFd = null;
+  const opAdd = (rec, op, ln) => {
+    (C.fileOps[rec] = C.fileOps[rec] || []).push({ op, ln });
+  };
+  let pendingId = null;
+
+  for (const s of sents){
+    if (s.t === 'sql'){
+      if (div === 'PROCEDURE' || div === null) sqlParse(C, s);
+      else C.warns.push(`line ${s.ln}: EXEC SQL outside PROCEDURE DIVISION — ignored`);
+      continue;
+    }
+    const t = s.text;
+    const w = tkWords(t.toUpperCase().replace(/\.$/,''));
+    if (!w.length) continue;
+    const v = w[0];
+
+    // divisions
+    if (/DIVISION\.$/.test(t.toUpperCase()) && ['IDENTIFICATION','ENVIRONMENT','DATA','PROCEDURE'].includes(v)){
+      div = v === 'ID' ? 'IDENTIFICATION' : v;
+      C.divisions.push({ name: div, ln: s.ln });
+      sec = null; para = null; curFd = null;
+      continue;
+    }
+    // PROGRAM-ID (peut être suivi du nom sur la phrase suivante si point isolé)
+    // PROGRAM-ID — le point peut suivre directement le mot-clé ("PROGRAM-ID. X.")
+    if (/^PROGRAM-ID\b/i.test(t)){
+      const m = t.match(/PROGRAM-ID[.]?\s+([A-Z0-9\-]+)/i);
+      if (m && !/^DIVISION/i.test(m[1])) C.programId = m[1].toUpperCase();
+      else if (!m) pendingId = true;
+      continue;
+    }
+    if (pendingId && IDENT.test(v) && !C.programId){
+      C.programId = v;
+      pendingId = false;
+      continue;
+    }
+    // sections (noms connus uniquement)
+    const SECTIONS = ['CONFIGURATION','INPUT-OUTPUT','FILE-CONTROL','FILE','WORKING-STORAGE','LINKAGE','LOCAL-STORAGE','COMMUNICATION','REPORT','SCREEN'];
+    if (w[1] === 'SECTION' && SECTIONS.includes(v)){
+      sec = v + '-SECTION';
+      C.sections.push({ name: sec, div, ln: s.ln });
+      para = null; curFd = null;
+      continue;
+    }
+    // section de PROCEDURE DIVISION (P100 SECTION.) : nœud au même titre qu'un paragraphe
+    if (div === 'PROCEDURE' && w[1] === 'SECTION' && IDENT.test(v) && !SECTIONS.includes(v)){
+      C.paragraphs.push({ name: v, ln: s.ln, section: true });
+      para = v;
+      continue;
+    }
+    // SELECT ... ASSIGN TO DDNAME
+    if (v === 'SELECT'){
+      const m = t.match(/SELECT\s+(?:OPTIONAL\s+)?([A-Z0-9\-]+)\s+ASSIGN\s+TO\s+([A-Z0-9\-]+)/i);
+      if (m) C.selects.push({ file: m[1].toUpperCase(), dd: m[2].toUpperCase(), ln: s.ln });
+      else {
+        const m2 = t.match(/SELECT\s+(?:OPTIONAL\s+)?([A-Z0-9\-]+)/i);
+        if (m2){ C.selects.push({ file: m2[1].toUpperCase(), dd: m2[1].toUpperCase(), ln: s.ln });
+          C.warns.push(`line ${s.ln}: SELECT without ASSIGN — DDNAME assumed = file name`); }
+        else C.warns.push(`line ${s.ln}: malformed SELECT — ignored`);
+      }
+      continue;
+    }
+    // FD
+    if (v === 'FD'){
+      const m = t.match(/FD\s+([A-Z0-9\-]+)/i);
+      if (m){ C.fds.push(m[1].toUpperCase()); curFd = m[1].toUpperCase(); }
+      continue;
+    }
+    // entrée de niveau (DATA DIVISION, division inconnue, ou section de données
+    // rencontrée sans DIVISION explicite — lenient mais jamais inventé)
+    if (/^[0-9]{1,2}$/.test(v) && (div === 'DATA' || div === null ||
+        ['FILE-SECTION','WORKING-STORAGE-SECTION','LINKAGE-SECTION','LOCAL-STORAGE-SECTION','COMMUNICATION-SECTION','REPORT-SECTION','SCREEN-SECTION'].includes(sec))){
+      levelEntry(C, w, s.ln, sec, sec === 'FILE-SECTION' ? curFd : null);
+      continue;
+    }
+    // paragraphe : nom seul suivi d'un point (PROCEDURE)
+    if (div === 'PROCEDURE' && w.length === 1 && IDENT.test(v) && !/^(SECTION|DIVISION|END|EXIT|STOP|GO|PERFORM|MOVE|IF|ELSE|CALL|READ|WRITE|OPEN|CLOSE|DISPLAY|COMPUTE|ADD|SUBTRACT|MULTIPLY|DIVIDE|SET|INITIALIZE|ACCEPT|EVALUATE|END-EVALUATE|WHEN|END-IF|UNTIL|VARYING|CONTINUE|RETURN)$/.test(v)){
+      C.paragraphs.push({ name: v, ln: s.ln });
+      para = v;
+      continue;
+    }
+    if (div === 'PROCEDURE' || div === null) procSentence(C, t, s, para, opAdd);
+  }
+  if (!C.programId) C.warns.push('PROGRAM-ID not found');
+  // cibles PERFORM / GO TO introuvables : signalées, aucune arête inventée
+  const knownParas = new Set(C.paragraphs.map(p=>p.name));
+  C.performs.forEach(p => {
+    if (p.to && !knownParas.has(p.to)) C.warns.push(`line ${p.ln}: PERFORM ${p.to} — paragraph/section not found → no edge created`);
+    if (p.thru && !knownParas.has(p.thru)) C.warns.push(`line ${p.ln}: PERFORM ... THRU ${p.thru} — target not found`);
+  });
+  C.gotos.forEach(g => {
+    if (g.to && !knownParas.has(g.to)) C.warns.push(`line ${g.ln}: GO TO ${g.to} — target not found → no edge created`);
+  });
+  resolveOps(C);
+  resolveCalls(C);
+  return C;
+}
+
+// ══════════════════ 1c. MODÈLE & GRAPHE (typé, preuves, confiance) ══════════════════
+// Nœuds 'type|nom' (job, step, prog, cpy, ds, tbl, xpgm) ; arêtes {f,t,k,c,ev}
+// avec kinds exec/contains/read/write/update/unknown/uses/call/sql-*, conf
+// certain/probable/unknown et preuves [{file,ln,note}]. ID typés → pas de
+// collision entre un dataset et un programme homonymes.
+
+// Le nom d'un job n'est désambiguïsé (name[file]) que s'il existe dans PLUSIEURS
+// fichiers uploadés — sinon le nom brut est conservé. Le résultat est
+// précalculé une fois : toutes les boucles (JCL, COBOL, backrefs) obtiennent
+// exactement le même identifiant pour un job donné.
+
+const CONF_RANK = { certain: 3, probable: 2, unknown: 1 };
+function buildModel(files){
+  linkCatalogedProcs();
+  const nodes = new Map();
+  const edges = [];
+  const fwd = {}, rev = {};
+  const addNode = (type, name, data) => {
+    const id = type + '|' + name;
+    if (!nodes.has(id)) nodes.set(id, { id, type, name, data: data || {} });
+    return nodes.get(id);
+  };
+  const eIdx = new Map();
+  const addEdge = (f, t, k, c, ev) => {
+    // déduplication O(1) : même (from,to,kind) → fusion preuves, confiance la plus forte garde la main
+    const key = f + '\u0001' + t + '\u0001' + k;
+    const ex = eIdx.get(key);
+    if (ex){
+      if ((CONF_RANK[c] || 0) > (CONF_RANK[ex.c] || 0)) ex.c = c;
+      (ev || []).forEach(x => { if (!ex.ev.some(y => y.note === x.note)) ex.ev.push(x); });
+      return ex;
+    }
+    const e = { f, t, k, c: c || 'certain', ev: ev || [] };
+    edges.push(e);
+    eIdx.set(key, e);
+    (fwd[f] = fwd[f] || []).push(e);
+    (rev[t] = rev[t] || []).push(e);
+    return e;
+  };
+  const m = { nodes, edges, fwd, rev, warnings: [], internal: {}, unknownCalls: [] };
+  // pré-pass : nom effectif de chaque job, stable pour toutes les boucles
+  const nameFiles = new Map();
+  files.forEach(f => { if (f.lang === 'JCL') (f.parsed.jobs || []).forEach(jb => {
+    const nm = jb.name || base(f.name);
+    if (!nameFiles.has(nm)) nameFiles.set(nm, new Set());
+    nameFiles.get(nm).add(f.name);
+  }); });
+  const jnameOf = (jb, f) => {
+    const nm = jb.name || base(f.name);
+    const fs = nameFiles.get(nm);
+    return (fs && fs.size > 1) ? nm + '[' + f.name + ']' : nm;
+  };
+
+  // ── JCL ── (structure moteur JCL v2 : step.target/kind/line,
+  //            dd.ddname/name/usage input|output|unknown/temp/backref/gdg/line)
+  const OP_MAP = { input:'read', output:'write', unknown:'unknown' };
+  const resolveDD = (jb, d) => {
+    // dataset effectif d'un DD — suit un backref *.STEP.DD (1 hop) ou *.PROCSTEP.STEP.DD (3 parties)
+    if (!d.name) return null;
+    if (!d.backref) return { name: d.name, temp: !!d.temp, gdg: d.gdg, via: null };
+    const parts = String(d.name).split('.');
+    if (parts.length >= 4){
+      // *.PROCSTEP.STEP.DD — le step appelant a été expandu : copies identifiées par 'via'
+      const inner = (jb.steps || []).find(s => s.via === parts[1] && s.name === parts[2]);
+      const src = inner && (inner.dds || []).find(x => (x.ddname || '').toUpperCase() === String(parts[3] || '').toUpperCase());
+      if (src && src.name && !src.backref) return { name: src.name, temp: !!src.temp, gdg: src.gdg, via: d.name };
+      return null;
+    }
+    const srcStep = parts[1], srcDD = parts[2];
+    const st = (jb.steps || []).find(s => s.name === srcStep);
+    const src = st && (st.dds || []).find(x => (x.ddname || '').toUpperCase() === String(srcDD || '').toUpperCase());
+    if (src && src.name && !src.backref) return { name: src.name, temp: !!src.temp, gdg: src.gdg, via: d.name };
+    return null;
+  };
+  files.forEach(f => {
+    if (f.lang !== 'JCL') return;
+    (f.parsed.jobs || []).forEach(jb => {
+      const jname = jnameOf(jb, f);
+      addNode('job', jname, { file: f.name });
+      (jb.steps || []).forEach(st => {
+        const sid = 'step|' + jname + '.' + st.name;
+        addNode('step', jname + '.' + st.name, { job: jname, pgm: st.target, kind: st.kind });
+        addEdge('job|' + jname, sid, 'contains', 'certain', [{ file: f.name, ln: st.line, note: 'EXEC ' + (st.target || '?') }]);
+        // EXEC PGM → prog (uploadé) ou xpgm (externe) ; PROC non résolue → avertissement, jamais d'arête inventée
+        if (st.kind === 'PGM' && st.target){
+          const isCbl = files.some(x => x.lang === 'CBL' && x.parsed.cobol && x.parsed.cobol.programId === st.target);
+          const pid = (isCbl ? 'prog|' : 'xpgm|') + st.target;
+          addNode(isCbl ? 'prog' : 'xpgm', st.target, { file: isCbl ? files.find(x => x.lang==='CBL' && x.parsed.cobol && x.parsed.cobol.programId===st.target).name : null });
+          addEdge(sid, pid, 'exec', 'certain', [{ file: f.name, ln: st.line, note: 'EXEC PGM=' + st.target }]);
+        } else if (st.kind === 'PROC'){
+          if (st.resolved === false) m.warnings.push('PROC ' + st.target + ' in ' + jname + '.' + st.name + ' not uploaded — cannot be expanded');
+          else if (st.target) addEdge(sid, 'xpgm|' + st.target, 'exec', 'unknown', [{ file: f.name, ln: st.line, note: 'EXEC PROC=' + st.target }]);
+        }
+        (st.dds || []).forEach(d => {
+          if (!d.name || d.backref) return; // backrefs résolus plus bas ; SYSOUT/DUMMY sans DSN ignorés
+          const op = OP_MAP[d.usage] || 'unknown';
+          const dsNode = addNode('ds', d.name, { temp: !!d.temp || String(d.name).startsWith('&&'), gdg: d.gdg != null ? d.gdg : null });
+          addEdge(sid, dsNode.id, op, op === 'unknown' ? 'unknown' : 'probable',
+            [{ file: f.name, ln: d.line, note: 'DD ' + d.ddname + ' DSN=' + d.name + (d.disp ? ' DISP=' + d.disp + ' — direction from DISP only, not confirmed by program I/O' : ' (no DISP)') }]);
+          if (op === 'unknown') m.warnings.push('dataset ' + d.name + ': usage unclear (no DISP, no matching program) — flagged, not guessed');
+        });
+      });
+    });
+  });
+
+  // ── COBOL ──
+  files.forEach(f => {
+    if (f.lang !== 'CBL' && f.lang !== 'CPY') return;
+    const C = f.parsed.cobol;
+    if (!C) return;
+    if (f.lang === 'CBL' && C.programId){
+      const pid = 'prog|' + C.programId;
+      addNode('prog', C.programId, { file: f.name });
+      // copybooks
+      C.copyUsed.forEach(cu => {
+        const cnode = addNode('cpy', cu.name, { file: cu.file || null });
+        const resolved = cu.resolved;
+        addEdge(pid, cnode.id, 'uses', resolved ? 'certain' : 'unknown', [{ file: f.name, ln: cu.ln, note: 'COPY ' + cu.name + (resolved ? '' : ' (not uploaded)') }]);
+      });
+      // CALLs
+      C.calls.forEach(c => {
+        if (!c.target) return;
+        const isCbl = files.some(x => x.lang === 'CBL' && x.parsed.cobol && x.parsed.cobol.programId === c.target);
+        const tid = (isCbl ? 'prog|' : 'xpgm|') + c.target;
+        addNode(isCbl ? 'prog' : 'xpgm', c.target, { file: isCbl ? files.find(x => x.lang==='CBL' && x.parsed.cobol && x.parsed.cobol.programId===c.target).name : null });
+        const conf = c.resolved === true ? 'certain' : c.resolved === 'var' ? 'probable' : 'unknown';
+        addEdge(pid, tid, 'call', conf, [{ file: f.name, ln: c.ln, note: 'CALL ' + (c.viaVar ? c.viaVar + ' (dynamic)' : c.target) }]);
+        if (conf === 'unknown') m.unknownCalls.push(c);
+      });
+      // DDNAME ↔ SELECT : lien certain si un verbe I/O existe (backrefs résolus)
+      C.selects.forEach(sl => {
+        C.fileOps[sl.file] && C.fileOps[sl.file].forEach(op => {
+          // retrouver les steps qui référencent ce DDNAME (dans les jobs)
+          files.forEach(jf => {
+            if (jf.lang !== 'JCL') return;
+            (jf.parsed.jobs || []).forEach(jb => {
+              (jb.steps || []).forEach(st => {
+                if (String(st.target || '').toUpperCase() !== C.programId) return; // le step doit exécuter CE programme (les DDNAME sont locaux à un step)
+                (st.dds || []).forEach(d => {
+                  if ((d.ddname || '').toUpperCase() !== sl.dd) return;
+                  const r = resolveDD(jb, d);
+                  if (!r) return;
+                  const dsNode = addNode('ds', r.name, { temp: r.temp, gdg: r.gdg });
+                  const ev = [
+                    { file: jf.name, ln: d.line, note: 'JCL: DD ' + d.ddname + ' DSN=' + (r.via ? r.via + ' → ' + r.name : r.name) },
+                    { file: f.name, ln: sl.ln, note: 'COBOL: SELECT ' + sl.file + ' ASSIGN TO ' + sl.dd },
+                    { file: f.name, ln: op.ln, note: 'COBOL: ' + op.op.toUpperCase() + ' ' + sl.file }
+                  ];
+                  addEdge('step|' + jnameOf(jb, jf) + '.' + st.name, dsNode.id, op.op, 'certain', ev);
+                });
+              });
+            });
+          });
+        });
+      });
+      // SQL → tables (opération reconnue uniquement ; type inconnu déjà signalé par le parseur)
+      C.sql.forEach(x => {
+        if (!['read','write','update'].includes(x.op)) return;
+        x.tables.forEach(tb => {
+          const tn = addNode('tbl', tb, {});
+          addEdge(pid, tn.id, 'sql-' + x.op, 'certain', [{ file: f.name, ln: x.ln, note: 'EXEC SQL ' + x.op.toUpperCase() + ' — ' + tb }]);
+        });
+      });
+      // flux interne pour le panneau flow
+      const inn = { paragraphs: C.paragraphs, edges: [] };
+      C.performs.forEach(p => inn.edges.push({ from: p.from, to: p.to, k: 'perform', ln: p.ln }));
+      C.gotos.forEach(g => inn.edges.push({ from: g.from, to: g.to, k: 'goto', ln: g.ln }));
+      m.internal[C.programId] = inn;
+      // paragraphes/sections = nœuds du graphe (impact navigable : job → step → prog → para)
+      const paraIds = new Set(C.paragraphs.map(p=>p.name));
+      C.paragraphs.forEach(p => {
+        const pnode = addNode('para', C.programId + '.' + p.name, { program: C.programId, ln: p.ln, section: !!p.section });
+        addEdge(pid, pnode.id, 'contains', 'certain', [{ file: f.name, ln: p.ln, note: p.section ? 'section header' : 'paragraph' }]);
+      });
+      const pEdge = (from, to, k, conf, note, ln2) => {
+        if (!from || !paraIds.has(from) || !paraIds.has(to) || from === to) return;
+        addEdge('para|' + C.programId + '.' + from, 'para|' + C.programId + '.' + to, k, conf, [{ file: f.name, ln: ln2, note }]);
+      };
+      C.performs.forEach(pr => {
+        pEdge(pr.from, pr.to, 'perform', 'certain', 'PERFORM ' + pr.to + (pr.thru ? ' THRU ' + pr.thru : ''), pr.ln);
+        if (pr.thru) pEdge(pr.from, pr.thru, 'perform', 'certain', 'PERFORM ' + pr.to + ' THRU ' + pr.thru, pr.ln);
+      });
+      C.gotos.forEach(g => {
+        pEdge(g.from, g.to, 'goto', g.depending ? 'probable' : 'certain', g.depending ? 'GO TO (DEPENDING ON — branch)' : 'GO TO', g.ln);
+      });
+    }
+    if (f.lang === 'CPY'){
+      addNode('cpy', base(f.name), { file: f.name });
+    }
+  });
+
+  // backrefs : *.STEP.DD → dataset réel du step source (usage JCL seul, sans preuve COBOL → probable)
+  files.forEach(f => {
+    if (f.lang !== 'JCL') return;
+    (f.parsed.jobs || []).forEach(jb => {
+      const jname = jnameOf(jb, f);
+      (jb.steps || []).forEach(st => {
+        const sid = 'step|' + jname + '.' + st.name;
+        (st.dds || []).forEach(d => {
+          if (!d.backref) return;
+          const r = resolveDD(jb, d);
+          const op = OP_MAP[d.usage] || 'unknown';
+          if (r){
+            const dsNode = addNode('ds', r.name, { temp: r.temp, gdg: r.gdg });
+            addEdge(sid, dsNode.id, op, op === 'unknown' ? 'unknown' : 'probable', [
+              { file: f.name, ln: d.line, note: 'DD ' + d.ddname + ' DSN=' + d.name },
+              { file: f.name, ln: d.line, note: 'resolves to ' + r.name }
+            ]);
+          } else {
+            m.warnings.push('backref ' + d.name + ' in ' + jname + '.' + st.name + ' could not be resolved (source step/DD not found)');
+          }
+        });
+      });
+    });
+  });
+
+  return m;
+}
+
+function impact(model, id){
+  // BFS amont/aval, profondeur ≤ 12, plus court chemin par nœud,
+  // confiance = la plus faible le long du chemin.
+  const up = { direct: [], indirect: [] };
+  const down = { direct: [], indirect: [] };
+  const adj = model.fwd, radj = model.rev;
+  const walk = (graph, bucket, dir) => {
+    const seen = new Map();
+    const q = [{ id, depth: 0, path: [id], edge: null, conf: 'certain' }];
+    while (q.length){
+      const cur = q.shift();
+      if (cur.depth >= 12) continue;
+      const list = (dir === 'fwd' ? (adj[cur.id]||[]) : (radj[cur.id]||[]));
+      for (const e of list){
+        const next = dir === 'fwd' ? e.t : e.f;
+        if (next === id) continue;
+        const conf = e.c === 'certain' ? cur.conf : (cur.conf === 'certain' ? e.c : (cur.conf === 'probable' && e.c === 'certain' ? 'probable' : 'unknown'));
+        const path = cur.path.concat([next]);
+        if (seen.has(next)){
+          const ex = seen.get(next);
+          if (path.length >= ex.path.length) continue;
+        }
+        seen.set(next, { id: next, depth: cur.depth + 1, path, edge: e, conf });
+        (cur.depth + 1 === 1 ? bucket.direct : bucket.indirect).push(seen.get(next));
+        q.push({ id: next, depth: cur.depth + 1, path, edge: e, conf });
+      }
+    }
+  };
+  walk(adj, down, 'fwd');
+  walk(radj, up, 'rev');
+  return { up, down };
+}
+
+function getModel(){
+  if (!state._model){
+    // re-parse des COBOL dont un copybook manquant est arrivé ensuite
+    let changed = true, guard = 0;
+    while (changed && guard < 5){
+      changed = false; guard++;
+      const reg = cobRegistry();
+      state.files.forEach(f => {
+        // INCLUDE JCL : re-parse si un membre manquant est arrivé depuis
+        if (f.lang === 'JCL' && (f.parsed.warnings||[]).some(w => {
+          const mm = /INCLUDE member ([A-Z0-9@$.]+) not uploaded/.exec(w);
+          return mm && jclMembers(f.name)[mm[1]] !== undefined;
+        })){
+          parseFile(f);
+          changed = true;
+        }
+        if (f.lang !== 'CBL' || !f.parsed.cobol) return;
+        if ((f.parsed.cobol.copyUsed||[]).some(c => !c.resolved && reg[c.name])){
+          parseFile(f);
+          changed = true;
+        }
+      });
+    }
+    state._model = buildModel(state.files);
+  }
+  return state._model;
+}
+
+// helpers UI (graphe)
+function nodeLabel(id){ const n = getModel().nodes.get(id); return n ? n.name : id; }
+function confBadge(c){
+  const map = { certain:['var(--green)','certain'], probable:['var(--yellow)','probable'], unknown:['var(--text3)','unclear'] };
+  const x = map[c] || map.unknown;
+  return `<span class="pill" style="color:${x[0]};border:1px solid ${x[0]}">${x[1]}</span>`;
+}
+function opBadge(op){
+  const map = { read:['var(--cyan)','READ'], write:['var(--green)','WRITE'], update:['var(--purple)','UPDATE'], delete:['var(--red)','DELETE'], unknown:['var(--text3)','UNKNOWN'] };
+  const x = map[op] || map.unknown;
+  return `<span class="pill" style="color:${x[0]};border:1px solid ${x[0]}">${x[1]}</span>`;
+}
+function evHTML(ev){
+  if (!ev || !ev.length) return '';
+  return `<div class="note" style="margin-top:4px;color:var(--text3)">${ev.map(e=>esc(e.file + ' L' + (e.ln||'?') + ': ' + e.note)).join(' · ')}</div>`;
+}
+const EDGE_VERB = { exec:'executes', contains:'contains step', read:'reads', write:'writes', update:'updates', unknown:'usage unclear', uses:'uses copybook', call:'calls', 'sql-read':'SELECTs', 'sql-write':'INSERTs/DELETEs', 'sql-update':'UPDATEs', perform:'PERFORMs', goto:'branches to (GO TO)', delete:'deletes records in' };
+function impNodeId(i){ const ns = [...getModel().nodes.values()].filter(n => n.type !== 'step'); return ns[+i] ? ns[+i].id : null; }
+
+// ══════════════════ SELF-TESTS (suite de tests intégrée) ══════════════════
+function runSelfTests(){
+  const out = [];
+  const T = (name, cond) => out.push({ name, pass: !!cond });
+  try {
+    const PAYREC = ['01  PAY-RECORD.','    05  ACC-ID      PIC 9(8).','    COPY INNER.'].join('\n');
+    const INNER  = '05  INNER-FLD PIC X(4).';
+    const reg = { PAYREC:{text:PAYREC,file:'PAYREC.CPY'}, INNER:{text:INNER,file:'INNER.CPY'} };
+    const F1 = ['000100 IDENTIFICATION DIVISION.','000200 PROGRAM-ID. CBPAY100.','000300 ENVIRONMENT DIVISION.','000400 INPUT-OUTPUT SECTION.','000500 FILE-CONTROL.','000600     SELECT TRANS-FILE ASSIGN TO TRANS.','000700 DATA DIVISION.','000800 FILE SECTION.','000900 FD  TRANS-FILE.','001000 01  TRANS-RECORD.','001100     COPY PAYREC.','001200 WORKING-STORAGE SECTION.','001300 01  WS-HOURS      PIC 9(4)V99.','001400 01  WS-PGM        PIC X(8).','001700 PROCEDURE DIVISION.','001800 MAIN-PARA.','001900     PERFORM INIT-PARA.','002000     MOVE \'SUBPGM\' TO WS-PGM.','002100     CALL WS-PGM.','002200     CALL \'CBPAY200\'.','002300     GO TO END-PARA.','002400 INIT-PARA.','002500     OPEN INPUT TRANS-FILE.','002600     READ TRANS-FILE.','002900 END-PARA.','003000     EXEC SQL','003100         SELECT ACC_ID FROM PAYROLL.ACCOUNTS A, PAYROLL.HIST','003200     END-EXEC','003400     EXEC SQL INSERT INTO PAYHIST VALUES (:X) END-EXEC'].join('\n');
+    const C1 = parseCOBOL('CBPAY100.CBL', F1, reg);
+    T('COBOL: fixed format detected', C1.fixed === true);
+    T('COBOL: PROGRAM-ID', C1.programId === 'CBPAY100');
+    T('COBOL: SELECT ASSIGN', C1.selects.length === 1 && C1.selects[0].dd === 'TRANS');
+    T('COBOL: PIC clause', (C1.vars.find(v=>v.name==='WS-HOURS')||{}).pic === '9(4)V99');
+    T('COBOL: COPY spliced into vars', !!C1.vars.find(v=>v.name==='ACC-ID'));
+    T('COBOL: nested COPY resolved', !!C1.vars.find(v=>v.name==='INNER-FLD'));
+    T('COBOL: PERFORM target', ((C1.performs.find(p=>p.to==='INIT-PARA')||{}).from) === 'MAIN-PARA');
+    T('COBOL: dynamic CALL resolved from MOVE', (C1.calls.find(c=>c.viaVar==='WS-PGM')||{}).target === 'SUBPGM');
+    T('COBOL: I/O verb on file', (C1.fileOps['TRANS-FILE']||[]).some(o=>o.op==='read'));
+    const reads = C1.sql.filter(x=>x.op==='read').flatMap(x=>x.tables);
+    T('SQL: FROM tables + alias list', reads.includes('PAYROLL.ACCOUNTS') && reads.includes('PAYROLL.HIST'));
+    T('SQL: INSERT INTO table', C1.sql.filter(x=>x.op==='write').flatMap(x=>x.tables).includes('PAYHIST'));
+    const F2 = ['IDENTIFICATION DIVISION.','PROGRAM-ID. FREEPGM.','WORKING-STORAGE SECTION.','COPY PAYREC REPLACING ==PAY-== BY ==FR-==.','COPY MISSING1.','PROCEDURE DIVISION.'].join('\n');
+    const C2 = parseCOBOL('F2.CBL', F2, reg);
+    T('COBOL: REPLACING applied', !!C2.vars.find(v=>v.name==='FR-RECORD'));
+    T('COBOL: missing copybook warned, not invented', C2.warns.some(w=>w.includes('MISSING1')));
+    const JCLT = ['//PAYRUN0  JOB  (ACCT),\'PAY\',CLASS=A','//STEP010  EXEC PGM=SORT','//SORTIN   DD DSN=PAYROLL.TRANS,DISP=SHR','//SORTOUT  DD DSN=&&SORTED,DISP=(,PASS)','//STEP020  EXEC PGM=CBPAY100','//TRANS    DD DSN=*.STEP010.SORTOUT,DISP=OLD','//OUTDS    DD DSN=PAYROLL.MASTER(+1),DISP=(,CATLG)','//STEP030  EXEC PGM=CBPAY200','//PAYMAST  DD DSN=PAYROLL.MASTER,DISP=OLD','//NODISP   DD DSN=NODISP.DATA'].join('\n');
+    const mfiles = [
+      { name:'PAYRUN0.JCL', lang:'JCL', text:JCLT },
+      { name:'CBPAY100.CBL', lang:'CBL', text:F1 },
+      { name:'PAYREC.CPY', lang:'CPY', text:PAYREC },
+    ];
+    mfiles.forEach(f => {
+      if (f.lang === 'JCL'){
+        const res = parseJCL(f.text);
+        if (!res.jobs.length && !Object.keys(res.procs).length) res.jobs.push({ name: base(f.name), steps: [], procsUsed: [], params: {} });
+        f.parsed = { jobs: res.jobs, procs: res.procs, warnings: res.warnings };
+      } else {
+        const C = parseCOBOL(f.name, f.text, reg);
+        f.parsed = { cobol: C, warnings: C.warns, programId: C.programId,
+          copies: C.copyUsed.map(c=>({name:c.name, resolved:!!c.resolved})),
+          sqlCount: C.sql.length, performs: C.performs.length, gotos: C.gotos.length };
+      }
+    });
+    const M = buildModel(mfiles);
+    const E = M.edges;
+    const has = (f,t,k) => E.some(e => e.f===f && e.t===t && e.k===k);
+    T('GRAPH: exec step→prog', has('step|PAYRUN0.STEP020','prog|CBPAY100','exec'));
+    T('GRAPH: SELECT+READ → certain read (backref)', (E.find(e=>e.f==='step|PAYRUN0.STEP020'&&e.t==='ds|&&SORTED'&&e.k==='read')||{}).c === 'certain');
+    T('GRAPH: DISP-only → probable input', (E.find(e=>e.f==='step|PAYRUN0.STEP010'&&e.t==='ds|PAYROLL.TRANS'&&e.k==='read')||{}).c === 'probable');
+    T('GRAPH: no DISP → unknown, flagged not guessed', has('step|PAYRUN0.STEP030','ds|NODISP.DATA','unknown'));
+    T('GRAPH: program uses copybook', has('prog|CBPAY100','cpy|PAYREC','uses'));
+    T('GRAPH: SQL table edge', has('prog|CBPAY100','tbl|PAYROLL.ACCOUNTS','sql-read'));
+    const imp = impact(M, 'cpy|PAYREC');
+    T('IMPACT: copybook → program direct', imp.up.direct.length === 1 && imp.up.direct[0].id === 'prog|CBPAY100');
+    const jobHit = imp.up.indirect.find(x => x.id === 'job|PAYRUN0');
+    T('IMPACT: copybook → job indirect via full path', !!jobHit && jobHit.path.length === 4);
+    const imp2 = impact(M, 'prog|CBPAY100');
+    T('IMPACT: program upstream direct = executing step', imp2.up.direct.some(x => x.id === 'step|PAYRUN0.STEP020'));
+    T('GRAPH: no duplicate edges (conf dedup + evidence merge)', !E.some((e,i)=>E.slice(i+1).some(x=>x.f===e.f&&x.t===e.t&&x.k===e.k)));
+  } catch (err){
+    out.push({ name: 'self-test crashed: ' + err.message, pass: false });
+  }
+  return out;
+}
+
+// ══════════════════ SELF-TESTS V2 (suite indépendante : FD/01, continuations, SQL, JCL, XSS) ══════════════════
+// Cas complexes absents des exemples de l'app — chaque cas reproduit un défaut
+// réel corrigé en V2. L'état de l'utilisateur est sauvegardé puis restauré.
+function runV2Tests(){
+  const out = [];
+  const T = (name, cond) => out.push({ name, pass: !!cond });
+  const bak = { files: state.files, loaded: state.loaded, log: state.log, entity: state.entity,
+    srcIdx: state.srcIdx, srcFile: state.srcFile, group: state.group, sub: state.sub };
+  try {
+    // ── 1. COBOL : FD ↔ 01, verbes I/O, commentaires, continuation de littérale ──
+    const CV2 = [
+      "000100 IDENTIFICATION DIVISION.",
+      "000200 PROGRAM-ID. BANKUPD.",
+      "000300 ENVIRONMENT DIVISION.",
+      "000400 INPUT-OUTPUT SECTION.",
+      "000500 FILE-CONTROL.",
+      "000600     SELECT MASTER-FILE ASSIGN TO MASTDD.",
+      "000700 DATA DIVISION.",
+      "000800 FILE SECTION.",
+      "000900 FD  MASTER-FILE.",
+      "001000 01  MAST-REC.",
+      "001100     05  MAST-ID  PIC X(8).",
+      "001200 WORKING-STORAGE SECTION.",
+      "001300 01  WS-BUF PIC X(80).",
+      "001400 01  WS-LIT PIC X(10) VALUE 'ABC",
+      "001500-    'DEF'.",
+      "001600 PROCEDURE DIVISION.",
+      "001700 INIT-S SECTION.",
+      "001800     PERFORM READ-S.",
+      "001900 READ-S.",
+      "002000     READ MASTER-FILE AT END MOVE 'Y' TO EOF",
+      "002100     MOVE 'OK' TO WS-BUF *> commentaire flottant",
+      "002200     WRITE MAST-REC FROM WS-BUF",
+      "002300     REWRITE MAST-REC",
+      "002400     DELETE MASTER-FILE",
+      "002500     WRITE GHOST-REC",
+      "002600     PERFORM NOWHERE-PARA",
+      "002700     GO TO INIT-S READ-S DEPENDING ON WS-SEL",
+      "002800     STOP RUN."
+    ].join("\n");
+    const C2 = parseCOBOL('BANKUPD.CBL', CV2, {});
+    T('V2 FD/01: WRITE sur le record → fichier FD', (C2.fileOps['MASTER-FILE']||[]).some(o=>o.op==='write'));
+    T('V2 FD/01: REWRITE sur le record → update', (C2.fileOps['MASTER-FILE']||[]).some(o=>o.op==='update'));
+    T('V2 FD/01: DELETE sur le fichier', (C2.fileOps['MASTER-FILE']||[]).some(o=>o.op==='delete'));
+    T('V2 FD/01: READ fichier conservé', (C2.fileOps['MASTER-FILE']||[]).some(o=>o.op==='read'));
+    T('V2 I/O non rattaché → averti, aucune relation inventée', C2.warns.some(w=>w.includes('GHOST-REC')) && !Object.keys(C2.fileOps).some(k=>k.includes('GHOST')));
+    T('V2 commentaire flottant *> ignoré', !!C2.vars.find(v=>v.name==='WS-BUF') && C2.paragraphs.length===2);
+    T('V2 littérale continuée (col 7 = -)', ((C2.vars.find(v=>v.name==='WS-LIT')||{}).value)==='ABCDEF');
+    T('V2 section de PROCEDURE reconnue', C2.paragraphs.some(p=>p.name==='INIT-S'&&p.section===true));
+    T('V2 GO TO ... DEPENDING multi-cibles', C2.gotos.filter(g=>g.depending).length===2 && C2.gotos.some(g=>g.to==='READ-S'&&g.depending));
+    T('V2 PERFORM cible introuvable → warning', C2.warns.some(w=>w.includes('NOWHERE-PARA')));
+
+    // ── 2. COPY REPLACING (formes mot et LEADING) ──
+    const REG2 = { CPYL:{ text:"01  OLD-REC.\n    05  OLD-FIELD PIC X(3).", file:'CPYL.CPY' },
+                   CPY2:{ text:"01  OLD-REC.\n    05  XOLD-FIELD PIC X(3).", file:'CPY2.CPY' } };
+    const C3 = parseCOBOL('T3.CBL', "IDENTIFICATION DIVISION.\nPROGRAM-ID. T3.\nWORKING-STORAGE SECTION.\nCOPY CPYL REPLACING OLD BY NEW.\nPROCEDURE DIVISION.", REG2);
+    T('V2 COPY REPLACING forme mot (OLD BY NEW)', !!C3.vars.find(v=>v.name==='NEW-REC') && !!C3.vars.find(v=>v.name==='NEW-FIELD'));
+    const C4 = parseCOBOL('T4.CBL', "IDENTIFICATION DIVISION.\nPROGRAM-ID. T4.\nWORKING-STORAGE SECTION.\nCOPY CPY2 REPLACING TRAILING OLD BY NEW.\nPROCEDURE DIVISION.", REG2);
+    T('V2 COPY REPLACING TRAILING (XOLD-FIELD → XNEW-FIELD)', !!C4.vars.find(v=>v.name==='XNEW-FIELD'));
+    const C4b = parseCOBOL('T4B.CBL', "IDENTIFICATION DIVISION.\nPROGRAM-ID. T4B.\nWORKING-STORAGE SECTION.\nCOPY CPY2 REPLACING LEADING OLD BY NEW.\nPROCEDURE DIVISION.", REG2);
+    T('V2 COPY REPLACING LEADING : aucun faux positif (XOLD-FIELD non préfixé inchangé)', !C4b.vars.find(v=>v.name==='XNEW-FIELD') && !!C4b.vars.find(v=>v.name==='XOLD-FIELD'));
+
+    // ── 3. SQL : JOIN/sous-requête/CTE, MERGE, guillemets, SQL dynamique ──
+    const C5 = parseCOBOL('T5.CBL', "IDENTIFICATION DIVISION.\nPROGRAM-ID. T5.\nPROCEDURE DIVISION.\n    EXEC SQL SELECT A.ID, B.ID FROM SCHEMA.T1 AS A INNER JOIN SCHEMA.T2 B ON A.ID = B.ID WHERE EXISTS (SELECT 1 FROM T3 WHERE T3.X = 1) END-EXEC.\n    EXEC SQL MERGE INTO PAYHIST T USING (SELECT ID FROM STAGE) S ON T.ID = S.ID WHEN MATCHED THEN UPDATE SET A = 1 END-EXEC.\n    EXEC SQL INSERT INTO \"MY TABLE\" (A) VALUES (1) END-EXEC.\n    EXEC SQL WITH CTE1 AS (SELECT ID FROM REALT) SELECT * FROM CTE1 JOIN T4B ON CTE1.ID = T4B.ID END-EXEC.\n    EXEC SQL PREPARE STM FROM :WS-SQL END-EXEC.\n    EXEC SQL INCLUDE SQLCA END-EXEC.\n    EXEC SQL WHENEVER NOT FOUND CONTINUE END-EXEC.\n    STOP RUN.", {});
+    const s0 = C5.sql[0]||{}, s1 = C5.sql[1]||{}, s2 = C5.sql[2]||{}, s3 = C5.sql[3]||{}, s4 = C5.sql[4]||{}, s5 = C5.sql[5]||{};
+    T('V2 SQL: JOIN + sous-requête EXISTS', s0.op==='read' && ['SCHEMA.T1','SCHEMA.T2','T3'].every(t=>s0.tables.includes(t)));
+    T('V2 SQL: MERGE INTO → update + tables', s1.op==='update' && s1.tables.includes('PAYHIST') && s1.tables.includes('STAGE'));
+    T('V2 SQL: identifiant entre guillemets', s2.op==='write' && s2.tables.includes('MY TABLE'));
+    T('V2 SQL: CTE exclue, tables réelles détectées', s3.op==='read' && s3.tables.includes('REALT') && s3.tables.includes('T4B') && !s3.tables.includes('CTE1'));
+    T('V2 SQL: PREPARE dynamique → 0 table + warning explicite', s4.op==='dynamic' && s4.tables.length===0 && C5.warns.some(w=>w.includes('dynamic SQL')));
+    T('V2 SQL: INCLUDE SQLCA / WHENEVER silencieux', s5.op==='other' && !C5.warns.some(w=>w.includes('SQLCA')));
+
+    // ── 4. JCL : PROC imbriqués, continuation, in-stream, IF/THEN, INCLUDE ──
+    const JV2 = [
+      "//JOBV2   JOB 1,'X'",
+      "//OUTER   PROC X=1",
+      "//OS1     EXEC PGM=PA",
+      "//DD1     DD DSN=A.B,DISP=SHR",
+      "//INNER   PROC Y=2",
+      "//IS1     EXEC PGM=PB",
+      "//         PEND",
+      "//OS2     EXEC PGM=PC",
+      "//         PEND",
+      "//CALL1   EXEC PROC=OUTER",
+      "//STEPX   EXEC PGM=PX",
+      "//DD2     DD DSN=X.Y,",
+      "//         DISP=SHR",
+      "//STEP3   EXEC PGM=P3",
+      "//SYSIN   DD *",
+      "RANDOM TEXT EXEC LIKE CONTENT",
+      "//IFSTEP  IF (RC=0) THEN",
+      "//NEXT    EXEC PGM=P4",
+      "//ENDSTEP ENDIF"
+    ].join("\n");
+    const J2 = parseJCL(JV2);
+    T('V2 JCL: PROC imbriqués in-stream (OUTER/INNER)', !!J2.procs.OUTER && !!J2.procs.INNER && J2.procs.OUTER.steps.length===2 && J2.procs.INNER.steps.length===1);
+    T('V2 JCL: PROC expandu au point d\'appel', J2.jobs[0].steps.length===5 && J2.jobs[0].steps[0].target==='PA' && J2.jobs[0].steps[0].via==='CALL1');
+    T('V2 JCL: continuation de paramètres (DSN/DISP sur 2 lignes)', (()=>{ const dd=(J2.jobs[0].steps.find(s=>s.name==='STEPX')||{dds:[]}).dds.find(d=>d.ddname==='DD2'); return !!dd && dd.name==='X.Y' && dd.usage==='input'; })());
+    T('V2 JCL: in-stream DD * non confondu avec du JCL', (()=>{ const st=J2.jobs[0].steps.find(s=>s.name==='STEP3')||{dds:[]}; return st.dds.some(d=>d.ddname==='SYSIN') && J2.jobs[0].steps.some(s=>s.name==='NEXT') && !J2.warnings.some(w=>w.includes('RANDOM')||w.includes('unrecognized')); })());
+    T('V2 JCL: IF ... THEN — condition sans le mot THEN', (()=>{ const st=J2.jobs[0].steps.find(s=>s.name==='NEXT'); return !!st && !!st.condition && st.condition.text==='(RC=0)'; })());
+    const MEM1 = "//S1 EXEC PGM=PM\n//DM DD DSN=INCL.DATA,DISP=SHR";
+    const J3 = parseJCL("//JMAIN JOB 1\n//I1 INCLUDE MEMBER=MEM1\n//S9 EXEC PGM=PZ", { MEM1: MEM1 });
+    T('V2 JCL: INCLUDE résolu quand le membre est uploadé', J3.jobs[0].steps.length===2 && J3.jobs[0].steps[0].target==='PM' && J3.jobs[0].steps[0].dds.some(d=>d.name==='INCL.DATA'));
+    const J4 = parseJCL("//J2 JOB 1\n//I2 INCLUDE MEMBER=NOSUCH\n//SX EXEC PGM=PY", { MEM1: MEM1 });
+    T('V2 JCL: INCLUDE manquant → warning précis, reste du job intact', J4.warnings.some(w=>w.includes('INCLUDE member NOSUCH not uploaded')) && J4.jobs[0].steps.length===1);
+
+    // ── 5. Graphe : paragraphes comme nœuds, FD certain, backref 3 parties, impact ──
+    state.files = [];
+    const GJ = "//JG1 JOB 1\n//PRC1 PROC\n//PS1 EXEC PGM=PP1\n//PD1 DD DSN=SRC.DATA,DISP=SHR\n// PEND\n//C1 EXEC PROC=PRC1\n//S2 EXEC PGM=BANKUPD\n//MASTDD DD DSN=BK.MASTER,DISP=SHR\n//BK DD DSN=*.C1.PS1.PD1,DISP=OLD";
+    const gfiles = [
+      { name:'G.JCL', lang:'JCL', text:GJ },
+      { name:'BANKUPD.CBL', lang:'CBL', text:CV2 },
+    ];
+    gfiles.forEach(f => {
+      if (f.lang === 'JCL'){ const res = parseJCL(f.text); f.parsed = { jobs: res.jobs, procs: res.procs, warnings: res.warnings }; }
+      else { const C = parseCOBOL(f.name, f.text, {}); f.parsed = { cobol: C, warnings: C.warns, programId: C.programId, copies: C.copyUsed.map(c=>({name:c.name,resolved:!!c.resolved})), sqlCount: C.sql.length, performs: C.performs.length, gotos: C.gotos.length }; }
+    });
+    const M = buildModel(gfiles);
+    const E = M.edges;
+    const has = (f,t,k) => E.some(e=>e.f===f&&e.t===t&&e.k===k);
+    T('V2 GRAPH: paragraphe = nœud (prog contains para)', has('prog|BANKUPD','para|BANKUPD.READ-S','contains'));
+    T('V2 GRAPH: PERFORM para→para certain', has('para|BANKUPD.INIT-S','para|BANKUPD.READ-S','perform'));
+    T('V2 GRAPH: GO TO DEPENDING para→para probable (depuis READ-S, pas de boucle sur soi)', (E.find(e=>e.f==='para|BANKUPD.READ-S'&&e.t==='para|BANKUPD.INIT-S'&&e.k==='goto')||{}).c==='probable' && !E.some(e=>e.f===e.t&&e.k==='goto'));
+    T('V2 GRAPH: WRITE sur record → dataset certain (SELECT+FD+WRITE)', (E.find(e=>e.f==='step|JG1.S2'&&e.t==='ds|BK.MASTER'&&e.k==='write')||{}).c==='certain');
+    T('V2 GRAPH: backref 3 parties *.C1.PS1.PD1 résolu', has('step|JG1.S2','ds|SRC.DATA','read'));
+    const impG = impact(M, 'job|JG1');
+    T('V2 IMPACT: JOB → paragraphe (chemin job→step→prog→para)', impG.down.indirect.some(x=>x.id==='para|BANKUPD.READ-S' && x.path.length===4));
+    const impP = impact(M, 'para|BANKUPD.READ-S');
+    T('V2 IMPACT: depuis un paragraphe — prog direct, job indirect', impP.up.direct.some(x=>x.id==='prog|BANKUPD') && impP.up.indirect.some(x=>x.id==='job|JG1'));
+
+    // ── 6. Sécurité : XSS — noms/contenus hostiles rendus échappés dans TOUS les panneaux ──
+    const EVJ = [
+      "//EVJ JOB 1,'<script>alert(1)<\/script>'",
+      "//S1 EXEC PGM=EVPGM",
+      "//DD1 DD DSN=EV\"><img src=x onerror=alert(1)>.DATA,DISP=SHR",
+      "//IFB IF (RC=0) OR '<b>hi</b>' = 'x' THEN",
+      "//S2 EXEC PGM=EV2",
+      "//ENDIF"
+    ].join("\n");
+    const EVC = "IDENTIFICATION DIVISION.\nPROGRAM-ID. EVCOBOL.\nPROCEDURE DIVISION.\n    DISPLAY '<img src=x onerror=alert(2)>'\n    EXEC SQL SELECT * FROM EV\"><table>.TAB END-EXEC\n    STOP RUN.";
+    state.files = [
+      { name:'EV"><img src=x onerror=alert(1)>.JCL', lang:'JCL', text:EVJ },
+      { name:'EV"><b>.CBL', lang:'CBL', text:EVC },
+    ];
+    state.files.forEach(f => parseFile(f));
+    state.loaded = true; state.log = [];
+    buildLog();
+    let allHTML = '';
+    Object.keys(PANELS).forEach(k => { try { allHTML += String(PANELS[k]()); } catch(e){ T('V2 XSS: panneau '+k+' rend sans crash', false); } });
+    T('V2 XSS: aucune balise brute injectée (<img/<script/<b>/<table>)', !/<img src=x|<script>alert|<b>hi<\/b>|<table>/.test(allHTML));
+    let badAttr = false;
+    let am; const are = /on(?:click|change|input)="([^"]*)"/g;
+    while ((am = are.exec(allHTML))) if (/[<>]/.test(am[1])) badAttr = true;
+    T('V2 XSS: attributs onclick/onchange sans < ni > bruts', !badAttr);
+    state.files = []; state.loaded = false; state.log = []; state._model = null;
+  } catch (e){
+    out.push({ name: 'V2 suite crashed: ' + e.message, pass: false });
+  } finally {
+    state.files = bak.files; state.loaded = bak.loaded; state.log = bak.log;
+    state.entity = bak.entity; state.srcIdx = bak.srcIdx; state.srcFile = bak.srcFile;
+    state.group = bak.group; state.sub = bak.sub; state._model = null;
+  }
+  return out;
+}
+
+// ══════════════════ 2. GESTION DES FICHIERS ══════════════════
+function cobRegistry(){
+  // registre des copybooks : nom de base → {text, file}
+  const reg = {};
+  state.files.forEach(x => { if (x.lang === 'CPY') reg[base(x.name)] = { text: x.text, file: x.name }; });
+  return reg;
+}
+
+function jclMembers(excludeName){
+  // membres INCLUDE disponibles = fichiers JCL du projet, indexés par nom de membre (sans extension)
+  const members = {};
+  state.files.forEach(x => { if (x.lang === 'JCL' && x.name !== excludeName) members[base(x.name)] = x.text; });
+  return members;
+}
+
 function parseFile(f){
   f.parsed = {};
   const t = f.text;
   if (f.lang === 'JCL'){
-    const res = parseJCL(t);
+    const res = parseJCL(t, jclMembers(f.name));
     // pas de JOB ni PROC → pseudo-job au nom du fichier ; fichier PROC-only → pas de pseudo-job
     if (!res.jobs.length && !Object.keys(res.procs).length)
       res.jobs.push({ name: base(f.name), steps: [], procsUsed: [], params: {} });
     res.jobs.forEach(jb => { jb.srcFile = f.name; });
-    f.parsed = { engine: 'v2', jobs: res.jobs, procs: res.procs, warnings: res.warnings };
-  } else if (f.lang === 'CBL'){
-    const pid = (t.match(/PROGRAM-ID[.]\s*([A-Z0-9\-]+)/i)||[])[1];
-    const copies = []; let m;
-    const re = /\bCOPY\s+([A-Z0-9\-]+)/gi;
-    while ((m = re.exec(t))) copies.push(m[1].toUpperCase());
-    f.parsed = {
-      programId: (pid || f.name.replace(/\.[^.]+$/,'')).toUpperCase(),
-      copies: [...new Set(copies)],
-      sqlCount: (t.match(/\bEXEC\s+SQL\b/gi)||[]).length,
-      performs: (t.match(/\bPERFORM\b/gi)||[]).length,
-      gotos: (t.match(/\bGO\s+TO\b/gi)||[]).length
-    };
+    f.parsed = { engine: 'v3', jobs: res.jobs, procs: res.procs, warnings: res.warnings };
+  } else if (f.lang === 'CBL' || f.lang === 'CPY'){
+    const C = parseCOBOL(f.name, t, cobRegistry());
+    f.parsed = { engine: 'v3', cobol: C, warnings: C.warns,
+      programId: f.lang === 'CBL' ? C.programId : null,
+      copies: C.copyUsed.map(c => ({ name: c.name, resolved: !!c.resolved })),
+      sqlCount: C.sql.length, performs: C.performs.length, gotos: C.gotos.length };
   }
+  state._model = null; // le graphe doit être reconstruit
 }
 
 function buildGraph(){
@@ -638,10 +1684,11 @@ function buildGraph(){
   });
   g.programs.forEach(p=>{
     const pid = p.parsed.programId;
-    p.parsed.copies.forEach(c=>{
+    (p.parsed.copies||[]).forEach(cu=>{
+      const c = cu.name;
       g.copybooks.forEach(cb=>{
         const cbn = base(cb.name);
-        if (cbn === c || c.indexOf(cbn) === 0) addEdge(pid, cbn);
+        if (cu.resolved && (cbn === c || c.indexOf(cbn) === 0)) addEdge(pid, cbn);
       });
     });
   });
@@ -668,7 +1715,10 @@ function stepDesc(s){
   if (outs.length)  parts.push(`writes ${outs.join(', ')}`);
   if (temps.length) parts.push(`temp ${temps.join(', ')}`);
   if (s.proc) parts.push(`<span style="color:var(--purple)">from PROC ${esc(s.proc)}${s.via ? ' (via ' + esc(s.via) + ')' : ''}</span>`);
-  if (s.condition) parts.push(`<span style="color:var(--yellow)">if: ${esc(s.condition)}</span>`);
+  if (s.condition){
+    const c = s.condition, txt = c && c.text ? c.text : String(c);
+    parts.push(`<span style="color:var(--yellow)">if ${c && c.neg ? 'NOT ' : ''}${esc(c && c.neg ? '(' + txt + ')' : txt)}</span>`);
+  }
   return parts.join(' · ');
 }
 
@@ -695,6 +1745,7 @@ async function handleFiles(fl){
 
 function removeFile(i){
   state.files.splice(i,1);
+  state._model = null;
   if (!state.files.length){ resetAll(); return; }
   if (state.srcFile && !state.files.some(f=>f.name===state.srcFile)) state.srcFile = state.files[0].name;
   renderLeft(); renderContent(); saveSession();
@@ -705,6 +1756,7 @@ function clearAllFiles(){ resetAll(); }
 function resetAll(){
   state.files = []; state.loaded = false; state.log = [];
   state.entity = null; state.srcFile = null; state.pySel = null;
+  state.srcIdx = null; state._model = null;
   state.group = 'explore'; state.sub = 'map';
   document.getElementById('statusText').textContent = 'Ready';
   clearSession();
@@ -723,32 +1775,26 @@ function analyze(){
 
 function buildLog(){
   const L = []; const add = (cls,text)=>L.push({cls,text});
-  add('info', `[parse] ${state.files.length} file(s) received — language auto-detected per file`);
-  if (state.files.some(f=>f.lang==='JCL'))
-    add('info', '[engine] JCL engine v2 — in-stream/cataloged PROCs, symbolic parameters, DISP I/O classification, GDG, temp datasets');
+  add('info', `[parse] ${state.files.length} file(s) received — COBOL engine v3 (structure, variables, I/O, SQL), JCL engine v2 (statements, PROC, backrefs)`);
   state.files.forEach(f=>{
     const why = f.lang==='JCL' ? 'JCL statements (engine v2)' : f.lang==='CBL' ? 'PROGRAM-ID found' : f.lang==='CPY' ? 'record layout' : 'unknown format';
     add('ok', `[ok] ${f.name} → ${f.lang} (${why})`);
-    if (f.lang==='JCL' && f.parsed.warnings) f.parsed.warnings.forEach(w=>add('warn', `[v2] ${f.name}: ${w}`));
+    (f.parsed.warnings||[]).forEach(w=>add('warn', `[v3] ${f.name}: ${w}`));
     if (f.lang==='JCL' && f.parsed.procs && Object.keys(f.parsed.procs).length)
-      add('info', `[v2] ${f.name}: PROC definition(s) available: ${Object.keys(f.parsed.procs).join(', ')}`);
+      add('info', `[v3] ${f.name}: PROC definition(s) available: ${Object.keys(f.parsed.procs).join(', ')}`);
     if (f.lang==='JCL' && f.parsed.jobs) f.parsed.jobs.forEach(jb=>{
       if (jb.steps.length)
-        add('info', `[v2] ${jb.name}: ${jb.steps.length} step(s) resolved${(jb.procsUsed||[]).length ? ' · PROCs: ' + [...new Set(jb.procsUsed)].join(', ') : ''}`);
+        add('info', `[v3] ${jb.name}: ${jb.steps.length} step(s) resolved${(jb.procsUsed||[]).length ? ' · PROCs: ' + [...new Set(jb.procsUsed)].join(', ') : ''}`);
     });
+    if (f.lang==='CBL' && f.parsed.cobol){
+      const C = f.parsed.cobol;
+      add('info', `[v3] ${C.programId || f.name}: ${C.paragraphs.length} paragraph(s), ${C.vars.length} data item(s), ${C.selects.length} SELECT, ${C.calls.length} CALL, ${C.sql.length} SQL block(s), ${C.copyUsed.length} COPY reference(s)`);
+    }
   });
-  const g = buildGraph();
-  g.programs.forEach(p=>p.parsed.copies.forEach(c=>{
-    if (!g.copybooks.some(cb=>base(cb.name)===c || c.indexOf(base(cb.name))===0))
-      add('warn', `[warn] ${p.parsed.programId}: copybook ${c} not uploaded`);
-  }));
-  g.jobs.forEach(j=>j.parsed.steps.forEach(s=>{
-    if (!s.pgm) return;
-    if (s.kind === 'PROC') add('warn', `[warn] ${base(j.name)}: PROC ${s.pgm} not uploaded — cannot be expanded`);
-    else if (!g.programs.some(p=>p.parsed.programId===s.pgm))
-      add('warn', `[warn] ${base(j.name)}: external or unknown program ${s.pgm}`);
-  }));
-  add('info', `[done] ${g.jobs.length} job(s) · ${g.programs.length} program(s) · ${g.copybooks.length} copybook(s) · ${g.datasets.length} dataset(s)`);
+  const m = getModel();
+  const byT = t=>[...m.nodes.values()].filter(n=>n.type===t).length;
+  m.warnings.forEach(w=>add('warn', `[graph] ${w}`));
+  add('info', `[done] ${byT('job')} job(s) · ${byT('prog')} program(s) · ${byT('cpy')} copybook(s) · ${byT('ds')} dataset(s) · ${byT('tbl')} DB2 table(s) — ${m.edges.length} relation(s), each with evidence and a confidence level`);
   state.log = L;
 }
 
@@ -762,40 +1808,56 @@ function emptyState(icon, title, sub){
 // ══════════════════ 4. SVG SYSTEM MAP (dynamique) ══════════════════
 
 function svgMap(filter=''){
-  const g = buildGraph();
+  const m = getModel();
+  const all = [...m.nodes.values()];
   const cols = [
-    {x:40,  w:150, type:'JCL JOB',  c:'var(--cyan)',   items:g.jobs.map(j=>base(j.name))},
-    {x:240, w:150, type:'COBOL',    c:'var(--accent)',  items:g.programs.map(p=>p.parsed.programId)},
-    {x:440, w:150, type:'COPYBOOK', c:'var(--yellow)', items:g.copybooks.map(c=>base(c.name))},
-    {x:640, w:170, type:'DATASET',  c:'var(--green)',   items:[...g.datasets]},
+    {x:40,  w:160, type:'JOB',      c:'var(--cyan)',    items:all.filter(n=>n.type==='job').map(n=>({id:n.id, label:n.name}))},
+    {x:230, w:160, type:'PROGRAM',  c:'var(--accent)',  items:all.filter(n=>n.type==='prog'||n.type==='xpgm').map(n=>({id:n.id, label:n.name + (n.type==='xpgm'?' *':'')}))},
+    {x:420, w:160, type:'COPYBOOK', c:'var(--yellow)',  items:all.filter(n=>n.type==='cpy').map(n=>({id:n.id, label:n.name}))},
+    {x:610, w:170, type:'DATASET',  c:'var(--green)',   items:all.filter(n=>n.type==='ds').map(n=>({id:n.id, label:n.name + (n.data.temp?' (temp)':'')}))},
+    {x:810, w:170, type:'DB2 TABLE',c:'var(--red)',     items:all.filter(n=>n.type==='tbl').map(n=>({id:n.id, label:n.name}))},
   ];
   const nodes = []; const idx = {};
-  cols.forEach(col=>col.items.forEach((label,i)=>{
-    idx[label] = nodes.length;
-    nodes.push({ label, type:col.type, c:col.c, x:col.x, y:18+i*70, w:col.w });
+  cols.forEach(col=>col.items.forEach((it,i)=>{
+    idx[it.id] = nodes.length;
+    nodes.push({ label: it.label, type:col.type, c:col.c, x:col.x, y:18+i*70, w:col.w });
   }));
   const maxN = Math.max(1, ...cols.map(c=>c.items.length));
   const height = 18 + (maxN-1)*70 + 44 + 16;
-  const width = 640 + 170 + 40;
-  const vis = new Set(nodes.filter(n=>n.label.toLowerCase().includes(filter.toLowerCase())).map(n=>n.label));
-  const edges = g.edges.filter(e=>idx[e.from]!=null && idx[e.to]!=null && vis.has(e.from) && vis.has(e.to)).map(e=>{
-    const A = nodes[idx[e.from]], B = nodes[idx[e.to]];
-    return `<path class="edge" marker-end="url(#arrow)" d="M ${A.x+A.w} ${A.y+22} C ${A.x+A.w+45} ${A.y+22}, ${B.x-45} ${B.y+22}, ${B.x} ${B.y+22}"/>`;
-  }).join('');
-  const nn = nodes.filter(n=>vis.has(n.label)).map(n=>`
+  const width = 810 + 170 + 40;
+  const fl = (filter||'').toLowerCase();
+  const idLabel = id => { const n = nodes[idx[id]]; return n ? n.label : ''; };
+  const vis = new Set(nodes.filter(n=>n.label.toLowerCase().includes(fl)).map((n,i)=>i));
+  // projection top-niveau : step→X devient job→X (les steps ne sont pas dessinés)
+  const proj = new Set();
+  for (const e of m.edges){
+    let f = e.f, t = e.t;
+    if (f.startsWith('step|')){
+      if (t.startsWith('step|')) continue; // contains : interne
+      f = 'job|' + f.split('|')[1].split('.')[0];
+    }
+    proj.add(f + '>' + t);
+  }
+  const edges = [...proj].map(k=>{ const [f,t] = k.split('>'); return {f,t}; })
+    .filter(e=>idx[e.f]!=null && idx[e.t]!=null && vis.has(idx[e.f]) && vis.has(idx[e.t]))
+    .map(e=>{
+      const A = nodes[idx[e.f]], B = nodes[idx[e.t]];
+      return `<path class="edge" marker-end="url(#arrow)" d="M ${A.x+A.w} ${A.y+22} C ${A.x+A.w+45} ${A.y+22}, ${B.x-45} ${B.y+22}, ${B.x} ${B.y+22}"/>`;
+    }).join('');
+  const nn = nodes.map((n,i)=>vis.has(i)?`
     <g class="node" transform="translate(${n.x},${n.y})">
       <rect width="${n.w}" height="44" fill="var(--bg3)" stroke="${n.c}"/>
-      <text x="10" y="19">${n.label.length>18?n.label.slice(0,17)+'…':n.label}</text>
+      <text x="10" y="19">${esc(n.label.length>18?n.label.slice(0,17)+'…':n.label)}</text>
       <text class="ntype" x="10" y="34">${n.type}</text>
-    </g>`).join('');
+    </g>`:'').join('');
   return `<svg viewBox="0 0 ${width} ${height}" width="100%" style="display:block">
     <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--border2)"/></marker></defs>
-    ${edges}${nn}</svg>`;
+    ${edges}${nn}</svg><p class="note" style="margin-top:6px">* = external program (not uploaded). Jobs link to programs and datasets through their steps; every relation shown was detected — nothing inferred.</p>`;
 }
 
 // ══════════════════ 5. SYNTAX HIGHLIGHTING (léger) ══════════════════
 
-function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function hl(text){
   const re = /\b(IDENTIFICATION DIVISION|PROCEDURE DIVISION|WORKING-STORAGE|FILE SECTION|PROGRAM-ID|END-PERFORM|END-EXEC|END-IF|GO TO|STOP RUN|PERFORM|COMPUTE|ROUNDED|UNTIL|EXEC SQL|SELECT|ASSIGN|DISPLAY|MOVE|COPY|READ|OPEN|CLOSE|PIC|ADD|END|JOB|EXEC|PGM|DSN|DD)\b/g;
   return esc(text).replace(re, m=>`<span class="k">${m}</span>`);
@@ -807,15 +1869,15 @@ function firstLines(text, n){
 
 // ══════════════════ 5b. ANTHROPIC API KEY (stockage local) ══════════════════
 
-let _keyMem = null; // fallback si localStorage bloqué (iframe sandbox)
-function getKey(){ try{ return localStorage.getItem('reforge_api_key') || _keyMem; } catch(e){ return _keyMem; } }
+let _keyMem = null; // fallback si le stockage est bloqué (iframe sandbox)
+function getKey(){ try{ return sessionStorage.getItem('reforge_api_key') || _keyMem; } catch(e){ return _keyMem; } }
 function saveKey(){
   const v = document.getElementById('apiKeyInput').value.trim();
   if (!v) return;
-  try { localStorage.setItem('reforge_api_key', v); } catch(e){ _keyMem = v; }
+  try { sessionStorage.setItem('reforge_api_key', v); } catch(e){ _keyMem = v; }
   renderContent();
 }
-function removeKey(){ try { localStorage.removeItem('reforge_api_key'); } catch(e){} _keyMem = null; renderContent(); }
+function removeKey(){ try { sessionStorage.removeItem('reforge_api_key'); } catch(e){} _keyMem = null; renderContent(); }
 function keyStatusHTML(){
   if (getKey()) return `<div style="display:flex;flex-direction:column;gap:8px;align-items:center">
     <span class="note" style="color:var(--green)">✓ API key stored locally in your browser</span>
@@ -823,7 +1885,7 @@ function keyStatusHTML(){
   return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center">
     <input class="key-input" id="apiKeyInput" type="password" placeholder="sk-ant-api03-…" autocomplete="off">
     <button class="key-btn" onclick="saveKey()">Save locally</button></div>
-  <p class="note">Stored in your browser (localStorage) — never sent to our servers.</p>`;
+  <p class="note">Stored in your browser (sessionStorage — cleared when the tab closes) — never sent to our servers.</p>`;
 }
 
 // ══════════════════ 5c. PERSISTANCE LOCALE (IndexedDB) + PROJET ══════════════════
@@ -832,7 +1894,7 @@ function keyStatusHTML(){
 // Export/import : fichier .json portable contenant uniquement les textes sources
 // (re-parsés à l'import — robuste aux évolutions du moteur).
 
-const SESSION_VER = 2;
+const SESSION_VER = 3;
 const _idbName = 'reforge-db', _idbStore = 'session';
 let _idb = null, _memSession = null;
 
@@ -936,7 +1998,7 @@ const PANELS = {
   map: () => state.loaded ? `
     <div class="toolbar">
       <input placeholder="Filter entities…" oninput="document.getElementById('mapHolder').innerHTML=svgMap(this.value)">
-      <div class="legend"><span><i style="background:var(--cyan)"></i>Jobs</span><span><i style="background:var(--accent)"></i>Programs</span><span><i style="background:var(--yellow)"></i>Copybooks</span><span><i style="background:var(--green)"></i>Datasets</span></div>
+      <div class="legend"><span><i style="background:var(--cyan)"></i>Jobs</span><span><i style="background:var(--accent)"></i>Programs</span><span><i style="background:var(--yellow)"></i>Copybooks</span><span><i style="background:var(--green)"></i>Datasets</span><span><i style="background:var(--red)"></i>DB2 tables</span></div>
     </div>
     <div class="svgwrap" id="mapHolder">${svgMap()}</div>`
     : emptyState('🗺','No system loaded','Drop your JCL and/or COBOL files — the system map will appear here once analysis is complete.'),
@@ -944,8 +2006,8 @@ const PANELS = {
   flow: () => {
     if (!state.loaded) return emptyState('🔀','No flow computed','Dependencies between jobs, steps and COBOL paragraphs (PERFORM / CALL / GOTO) will appear here.');
     const g = buildGraph();
-    if (!g.jobs.length) return emptyState('🔀','No JCL job found','Job steps are detected from //STEP EXEC PGM= statements.');
-    return g.jobs.map(j=>`
+    const m = getModel();
+    const jobCards = g.jobs.map(j=>`
       <div class="card" style="max-width:620px;margin-bottom:14px">
         <h3>${base(j.name)} — job flow</h3>
         ${j.parsed.steps.length ? j.parsed.steps.map(s=>`
@@ -954,247 +2016,274 @@ const PANELS = {
         : '<p class="note">No EXEC step found in this job.</p>'}
         ${j.parsed.dsns.length ? `<p class="note">DD datasets: ${j.parsed.dsns.map(esc).join(' · ')}</p>` : ''}
       </div>`).join('');
+    const progCards = Object.entries(m.internal).map(([pname,inn])=>`
+      <div class="card" style="max-width:620px;margin-bottom:14px">
+        <h3>${esc(pname)} — program flow</h3>
+        ${inn.paragraphs.length ? `<p class="note">Paragraphs: ${inn.paragraphs.map(p=>`<span class="pill pill-io">${esc(p.name)}</span>`).join(' ')}</p>` : '<p class="note">No paragraph detected.</p>'}
+        ${inn.edges.length ? inn.edges.map(e=>`<div class="step-sub"><span class="mono" style="color:var(--accent)">${esc(e.from||'—')}</span> <span style="color:var(--purple)">—${e.k==='goto'?'GO TO':'PERFORM'}→</span> <span class="mono">${esc(e.to)}</span> <span class="note">(L${e.ln})</span></div>`).join('') : '<p class="note">No PERFORM / GO TO between paragraphs detected in this program.</p>'}
+      </div>`).join('');
+    if (!jobCards && !progCards) return emptyState('🔀','No job or program found','Job steps are detected from //STEP EXEC PGM= statements.');
+    return jobCards + progCards;
   },
 
   programs: () => {
     if (!state.loaded) return emptyState('🖥','No program loaded','JCL jobs and COBOL programs will appear here, regardless of their source language.');
-    const g = buildGraph();
-    const rows = [
-      ...g.jobs.map(j=>({name:base(j.name), lang:'JCL', lines:j.lines, by:'—'})),
-      ...g.programs.map(p=>({name:p.parsed.programId, lang:'COBOL', lines:p.lines,
-        by: g.jobs.filter(j=>j.parsed.steps.some(s=>s.pgm===p.parsed.programId)).map(j=>base(j.name)).join(', ') || '—'})),
-    ];
+    const m = getModel();
+    const rows = [];
+    [...m.nodes.values()].filter(n=>n.type==='prog').forEach(n=>{
+      const f = state.files.find(x=>x.lang==='CBL' && x.parsed.cobol && x.parsed.cobol.programId===n.name);
+      const callers = (m.rev[n.id]||[]).filter(e=>e.k==='exec').map(e=>nodeLabel(e.f)).join(', ');
+      rows.push({name:n.name, lang:'COBOL', ext:false, lines:f?f.lines:'—', by:callers||'—'});
+    });
+    [...m.nodes.values()].filter(n=>n.type==='xpgm').forEach(n=>{
+      const callers = (m.rev[n.id]||[]).map(e=>nodeLabel(e.f)).join(', ');
+      rows.push({name:n.name, lang:'—', ext:true, lines:'—', by:callers||'—'});
+    });
+    [...m.nodes.values()].filter(n=>n.type==='job').forEach(n=>{
+      rows.push({name:n.name, lang:'JCL', ext:false, lines:'—', by:'—'});
+    });
     if (!rows.length) return emptyState('🖥','No program detected','Drop JCL or COBOL files to populate this view.');
     return `<div class="card"><table class="tbl">
-      <tr><th>Program / Job</th><th>Language</th><th>Lines</th><th>Called by</th></tr>
-      ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td><span class="pill pill-io">${r.lang}</span></td><td>${r.lines}</td><td>${esc(r.by)}</td></tr>`).join('')}
-    </table></div>`;
+      <tr><th>Program / Job</th><th>Language</th><th>Lines</th><th>Called by (step)</th></tr>
+      ${rows.map(r=>`<tr><td>${esc(r.name)}${r.ext?' <span class="pill" style="color:var(--yellow);border:1px solid var(--yellow)">EXTERNAL</span>':''}</td><td><span class="pill pill-io">${r.lang}</span></td><td>${r.lines}</td><td>${esc(r.by)}</td></tr>`).join('')}
+    </table><p class="note">EXTERNAL = referenced by EXEC/CALL but not uploaded. “Called by” lists the JCL steps detected with evidence.</p></div>`;
   },
 
   data: () => {
     if (!state.loaded) return emptyState('🗂','No data detected','JCL datasets, COBOL SELECT/FD files and data structures will appear here.');
-    const g = buildGraph();
-    if (!g.datasets.length) return emptyState('🗂','No dataset detected','Datasets are detected from JCL DD DSN= statements.');
-    const usage = {};
-    g.jobs.forEach(j=>j.parsed.steps.forEach(s=>(s.dds||[]).forEach(d=>{
-      if (!d.name) return;
-      const u = usage[d.name] = usage[d.name] || { in:false, out:false, gdg:false };
-      if (d.usage === 'input') u.in = true;
-      if (d.usage === 'output') u.out = true;
-      if (d.gdg != null) u.gdg = true;
-    })));
-    const uBadge = u => {
-      const b = [];
-      if (u.in)   b.push('<span class="pill" style="color:var(--cyan);border:1px solid var(--cyan)">INPUT</span>');
-      if (u.out)  b.push('<span class="pill" style="color:var(--green);border:1px solid var(--green)">OUTPUT</span>');
-      if (u.gdg)  b.push('<span class="pill" style="color:var(--purple);border:1px solid var(--purple)">GDG</span>');
-      return b.join(' ') || '<span class="pill pill-io">—</span>';
-    };
+    const m = getModel();
+    const dsNodes = [...m.nodes.values()].filter(n=>n.type==='ds');
+    if (!dsNodes.length) return emptyState('🗂','No dataset detected','Datasets are detected from JCL DD DSN= statements.');
     return `<div class="card"><table class="tbl">
-      <tr><th>Dataset</th><th>Usage</th><th>Referenced by</th></tr>
-      ${g.datasets.map(d=>{
-        const jobs = g.jobs.filter(j=>j.parsed.dsns.includes(d)).map(j=>base(j.name)).join(', ');
-        return `<tr><td>${esc(d)}</td><td>${uBadge(usage[d] || {})}</td><td>${esc(jobs||'—')}</td></tr>`;
+      <tr><th>Dataset</th><th>Usage</th><th>Accessed by (step)</th><th>Confidence</th><th>Evidence</th></tr>
+      ${dsNodes.map(d=>{
+        const eds = m.rev[d.id]||[];
+        return `<tr><td>${esc(d.name)}${d.data.temp?' <span class="pill" style="color:var(--purple);border:1px solid var(--purple)">TEMP</span>':''}${d.data.gdg!=null?' <span class="pill" style="color:var(--purple);border:1px solid var(--purple)">GDG</span>':''}</td>
+        <td>${[...new Set(eds.map(e=>e.k))].filter(k=>['read','write','update','delete','unknown'].includes(k)).map(opBadge).join(' ')||'<span class="pill pill-io">—</span>'}</td>
+        <td>${eds.map(e=>esc(nodeLabel(e.f))).join('<br>')||'—'}</td>
+        <td>${[...new Set(eds.map(e=>e.c))].map(confBadge).join(' ')}</td>
+        <td class="note">${eds.map(e=>esc((e.ev[0]?e.ev[0].file+' L'+e.ev[0].ln:'')+(e.ev.length>1?' +'+(e.ev.length-1)+' more':''))).join('<br>')}</td></tr>`;
       }).join('')}
-    </table><p class="note">Usage classified from DISP (NEW/MOD → output, SHR/OLD → input). FD-level matching and lineage are computed by the full analyzer engine.</p></div>`;
+    </table><p class="note">READ/WRITE is <b>certain</b> when a COBOL SELECT/ASSIGN matches the JCL DDNAME and an I/O verb (OPEN/READ/WRITE/REWRITE) is found, <b>probable</b> from DISP only, <b>unclear</b> when neither is available.</p></div>`;
   },
 
   impact: () => {
     if (!state.loaded) return emptyState('💥','Impact Analysis','Run analysis then select any entity to see its dependencies.');
-    const g = buildGraph();
-    const labels = [...g.jobs.map(j=>base(j.name)), ...g.programs.map(p=>p.parsed.programId), ...g.copybooks.map(c=>base(c.name)), ...g.datasets];
-    if (!labels.length) return emptyState('💥','Nothing to analyze yet','Drop files first.');
-    if (!state.entity || !labels.includes(state.entity)) state.entity = labels[0];
-    const label = state.entity;
-    const inc = g.edges.filter(e=>e.to===label).map(e=>e.from);
-    const progInc = inc.filter(i=>typeOf(i,g)==='COBOL');
-    const jobsAffected = [...new Set([
-      ...inc.filter(i=>typeOf(i,g)==='JCL JOB'),
-      ...g.edges.filter(e=>progInc.includes(e.to)).map(e=>e.from).filter(f=>typeOf(f,g)==='JCL JOB')
-    ])];
-    const out = g.edges.filter(e=>e.from===label).map(e=>e.to);
-    return `<div class="grid2" style="max-width:760px">
-      <div class="card impact-left">
-        <h3>Select an entity</h3>
-        ${labels.slice(0,12).map(l=>`<div class="entity ${l===label?'sel':''}" onclick="state.entity='${l}';renderContent()">${esc(l)}</div>`).join('')}
-      </div>
-      <div class="card">
-        <h3>Impact of changing <span class="mono" style="color:var(--accent)">${esc(label)}</span></h3>
-        ${progInc.length ? `<div class="impact-arrow">↓ ${progInc.length} program(s) recompile</div>${progInc.map(p=>`<div class="entity-row">${esc(p)}</div>`).join('')}` : ''}
-        ${jobsAffected.length ? `<div class="impact-arrow">↓ ${jobsAffected.length} job(s) to re-run</div>${jobsAffected.map(p=>`<div class="entity-row">${esc(p)}</div>`).join('')}` : ''}
-        ${inc.length && !progInc.length && !jobsAffected.length ? `<div class="impact-arrow">↓ ${inc.length} direct dependent(s)</div>${inc.map(p=>`<div class="entity-row">${esc(p)} <span class="note">(${typeOf(p,g)})</span></div>`).join('')}` : ''}
-        ${!inc.length ? '<p class="note">No dependent entity detected — this looks like a leaf node.</p>' : ''}
-        ${out.length ? `<div class="impact-arrow">→ references ${out.length} entit(ies)</div><div class="entity-row" style="color:var(--text2)">${out.map(esc).join(' · ')}</div>` : ''}
-      </div>
+    const m = getModel();
+    const nodes = [...m.nodes.values()].filter(n=>n.type!=='step');
+    if (!nodes.length) return emptyState('💥','Nothing to analyze yet','Drop files first.');
+    if (!state.entity || !m.nodes.has(state.entity)) state.entity = nodes[0].id;
+    const res = impact(m, state.entity);
+    const GRP = { job:'Jobs', step:'Steps', prog:'Programs', para:'Paragraphs', cpy:'Copybooks', ds:'Datasets', tbl:'DB2 tables', xpgm:'External programs' };
+    const itemHTML = it => {
+      const n = m.nodes.get(it.id);
+      return `<div class="entity-row" style="margin-bottom:8px">
+        <b>${esc(it.id.split('|')[1])}</b> <span class="pill pill-io">${n?n.type:'?'}</span> ${confBadge(it.conf)}
+        <span class="note">(${it.depth===1?'direct':'indirect, depth '+it.depth})</span>
+        <div class="note">path: ${it.path.map(p=>esc(p.split('|')[1])).join(' ← ')}</div>
+        ${it.edge ? `<div class="note">because it ${esc(EDGE_VERB[it.edge.k]||it.edge.k)} — evidence: ${esc(it.edge.ev[0]?it.edge.ev[0].file+' L'+it.edge.ev[0].ln:'n/a')}</div>` : ''}
+      </div>`;
+    };
+    const byType = arr => {
+      let h = '';
+      for (const [t,label] of Object.entries(GRP)){
+        const its = arr.filter(x=>m.nodes.get(x.id) && m.nodes.get(x.id).type===t);
+        if (its.length) h += `<p class="note" style="margin-top:8px"><b>${label} (${its.length})</b></p>` + its.map(itemHTML).join('');
+      }
+      return h;
+    };
+    let opts = '';
+    nodes.forEach((n,i)=>{ opts += `<option value="${i}"${state.entity===n.id?' selected':''}>${esc(n.type.toUpperCase()+' — '+n.name)}</option>`; });
+    const selName = state.entity.split('|')[1];
+    return `
+    <div class="toolbar"><select class="key-input" style="width:auto" onchange="state.entity=impNodeId(this.value);renderContent()">${opts}</select></div>
+    <div class="card" style="max-width:760px;margin-bottom:14px"><h3>Impacted by a change of <span class="mono" style="color:var(--accent)">${esc(selName)}</span></h3>
+      ${byType(res.up.direct) || '<p class="note">No direct dependent detected.</p>'}
+      ${res.up.indirect.length ? `<h3 style="margin-top:12px">Indirect (transitive)</h3>${byType(res.up.indirect)}` : ''}
+    </div>
+    <div class="card" style="max-width:760px"><h3>What <span class="mono" style="color:var(--accent)">${esc(selName)}</span> depends on</h3>
+      ${byType(res.down.direct) || '<p class="note">No detected dependency.</p>'}
+      ${res.down.indirect.length ? `<h3 style="margin-top:12px">Indirect</h3>${byType(res.down.indirect)}` : ''}
     </div>`;
   },
 
   lineage: () => {
     if (!state.loaded) return emptyState('🔀','No data lineage computed','Run analysis to trace data flows across your system.');
-    const g = buildGraph();
-    if (!g.datasets.length) return emptyState('🔀','No dataset detected','Lineage is built from DD DSN= statements and COBOL SELECT/FD.');
-    return `<div class="card" style="max-width:680px">
-      <h3>Data lineage</h3>
-      ${g.datasets.map(d=>{
-        const jobs = g.jobs.filter(j=>j.parsed.dsns.includes(d));
-        return jobs.map(j=>{
-          const jid = base(j.name);
-          return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px;margin-bottom:10px">
-            <span class="entity sel" style="cursor:default">${esc(d)}</span> ←
-            <span class="entity-row" style="padding:7px 10px;background:var(--bg3);border-radius:7px">${esc(jid)} <span class="note">(JCL DD)</span></span>
-            ${j.parsed.steps.map(s=>`← <span class="entity-row" style="padding:7px 10px;background:var(--bg3);border-radius:7px">${esc(s.pgm)}</span>`).join('')}
-          </div>`;
-        }).join('');
-      }).join('')}
-      <p class="note">Full FD-level lineage (COBOL SELECT/FD ↔ JCL DD matching) is computed by the analyzer engine.</p>
-    </div>`;
+    const m = getModel();
+    const dsNodes = [...m.nodes.values()].filter(n=>n.type==='ds'||n.type==='tbl');
+    if (!dsNodes.length) return emptyState('🔀','No dataset detected','Lineage is built from JCL DD statements, COBOL SELECT/ASSIGN + I/O verbs, and EXEC SQL tables.');
+    const html = dsNodes.map(d=>{
+      const eds = m.rev[d.id]||[];
+      if (!eds.length) return '';
+      return `<div class="card" style="max-width:680px;margin-bottom:14px">
+        <h3>${esc(d.name)} ${d.type==='tbl'?'<span class="pill" style="color:var(--red);border:1px solid var(--red)">DB2</span>':''}${d.data.temp?' <span class="pill" style="color:var(--purple);border:1px solid var(--purple)">TEMP</span>':''}</h3>
+        ${eds.map(e=>{
+          const prog = (m.rev[e.f]||[]).filter(x=>x.k==='exec').map(x=>nodeLabel(x.t))[0];
+          const op = ['read','write','update','delete','unknown'].includes(e.k) ? e.k : e.k.replace('sql-','');
+          return `<div style="margin-bottom:10px">
+            <span class="entity-row">${esc(nodeLabel(e.f))}</span>${prog?` <span class="note">runs ${esc(prog)}</span>`:''}
+            ${opBadge(op)} ${confBadge(e.c)}
+            ${evHTML(e.ev)}</div>`;
+        }).join('')}
+      </div>`;
+    }).join('');
+    return html || emptyState('🔀','No dataset detected','Lineage is built from JCL DD statements, COBOL SELECT/ASSIGN + I/O verbs, and EXEC SQL tables.');
   },
 
   db2: () => {
     if (!state.loaded) return emptyState('🗄','No DB2 / SQL detected','Upload COBOL with EXEC SQL … END-EXEC statements.');
-    const g = buildGraph();
-    const sqls = g.programs.filter(p=>p.parsed.sqlCount>0);
-    if (!sqls.length) return emptyState('🗄','No DB2 / SQL detected','No EXEC SQL statement found in the uploaded COBOL files.');
-    return sqls.map(p=>`
-      <div class="card" style="max-width:680px;margin-bottom:14px">
-        <h3>DB2 / SQL in ${esc(p.parsed.programId)}</h3>
-        <div class="log">${firstLines(p.text.split('\n').filter(l=>/EXEC\s+SQL/i.test(l)).join('\n') || 'EXEC SQL detected', 8)}</div>
-        <p class="note">${p.parsed.sqlCount} embedded SQL statement(s)</p>
-      </div>`).join('');
+    const m = getModel();
+    const tblNodes = [...m.nodes.values()].filter(n=>n.type==='tbl');
+    if (!tblNodes.length) return emptyState('🗄','No DB2 / SQL detected','No EXEC SQL block with table references found in the uploaded COBOL files.');
+    const tablesCard = `<div class="card" style="max-width:760px;margin-bottom:14px"><table class="tbl">
+      <tr><th>DB2 table</th><th>Operations</th><th>Programs</th><th>Evidence</th></tr>
+      ${tblNodes.map(t=>{
+        const eds = m.rev[t.id]||[];
+        const progs = [...new Set(eds.map(e=>nodeLabel(e.f)))];
+        return `<tr><td>${esc(t.name)}</td><td>${[...new Set(eds.map(e=>e.k.replace('sql-','').toUpperCase()))].map(o=>`<span class="pill pill-io">${o}</span>`).join(' ')}</td><td>${esc(progs.join(', '))}</td><td class="note">${eds.map(e=>esc((e.ev[0]?e.ev[0].file+' L'+e.ev[0].ln:''))).join('<br>')}</td></tr>`;
+      }).join('')}
+    </table></div>`;
+    const progCards = state.files.filter(f=>f.lang==='CBL' && f.parsed.cobol && f.parsed.cobol.sql.length).map(f=>{
+      const C = f.parsed.cobol;
+      return `<div class="card" style="max-width:760px;margin-bottom:14px">
+        <h3>SQL in ${esc(C.programId || f.name)}</h3>
+        ${C.sql.map(x=>`<div class="step-sub" style="margin-bottom:6px"><span class="pill pill-io">${x.op.toUpperCase()}</span> <span class="mono">${esc(x.tables.join(', ')||'—')}</span> <span class="note">(L${x.ln})</span></div>`).join('')}
+      </div>`;
+    }).join('');
+    return tablesCard + progCards;
   },
 
   summary: () => {
     if (!state.loaded) return emptyState('📋','Summary not available','Run analysis to generate a system overview.');
-    const g = buildGraph();
-    const jobNames = g.jobs.map(j=>base(j.name)).join(', ') || 'none';
-    const progNames = g.programs.map(p=>p.parsed.programId).join(', ') || 'none';
-    const unresolved = [];
-    g.programs.forEach(p=>p.parsed.copies.forEach(c=>{
-      if (!g.copybooks.some(cb=>base(cb.name)===c || c.indexOf(base(cb.name))===0)) unresolved.push(`${p.parsed.programId} → ${c}`);
-    }));
-    const gotoFiles = g.programs.filter(p=>p.parsed.gotos>0).map(p=>`${p.parsed.programId} (${p.parsed.gotos}× GO TO)`);
+    const m = getModel();
+    const byT = t=>[...m.nodes.values()].filter(n=>n.type===t);
+    const unknownDs = m.edges.filter(e=>e.k==='unknown').length;
+    const dynCalls = m.unknownCalls.length;
+    const ext = byT('xpgm').length;
+    const missingCpy = m.warnings.filter(w=>w.includes('not uploaded')).length;
+    const parseWarns = state.files.reduce((a,f)=>a+(f.parsed.warnings||[]).length,0);
+    const jobNames = byT('job').map(n=>n.name).join(', ') || 'none';
+    const progNames = byT('prog').map(n=>n.name).join(', ') || 'none';
     return `<div class="grid2" style="max-width:760px">
       <div class="card"><h3>System overview</h3>
         <p class="note" style="font-size:13px;line-height:1.6;color:var(--text2)">
-        This system contains <b class="mono" style="color:var(--text)">${g.jobs.length}</b> JCL job(s) (${esc(jobNames)}),
-        <b class="mono" style="color:var(--text)">${g.programs.length}</b> COBOL program(s) (${esc(progNames)}),
-        ${g.copybooks.length} copybook(s) and ${g.datasets.length} dataset(s).
-        ${g.jobs.length ? 'Job orchestration and program references were resolved from EXEC PGM statements; copybook usage from COPY statements.' : ''}</p></div>
+        This system contains <b class="mono" style="color:var(--text)">${byT('job').length}</b> job(s) (${esc(jobNames)}),
+        <b class="mono" style="color:var(--text)">${byT('prog').length}</b> COBOL program(s) (${esc(progNames)}),
+        ${byT('cpy').length} copybook(s), ${byT('ds').length} dataset(s) and ${byT('tbl').length} DB2 table(s),
+        linked by <b class="mono" style="color:var(--text)">${m.edges.length}</b> detected relation(s).
+        Every relation carries its evidence (file + line) and a confidence level: certain, probable or unclear.
+        Nothing is displayed that was not actually detected.</p></div>
       <div class="card"><h3>Health signals</h3>
         <div class="log">
-          ${g.copybooks.length && !unresolved.length ? '<span class="ok">✓ All copybooks resolved</span><br>' : ''}
-          ${!g.jobs.some(j=>j.parsed.steps.some(s=>!g.programs.some(p=>p.parsed.programId===s.pgm) && ['SORT','IEBGENER','IEBPTPCH','IDCAMS'].indexOf(s.pgm)<0)) ? '<span class="ok">✓ All PGM references resolved</span><br>' : ''}
-          ${unresolved.length ? `<span class="warn">⚠ Missing copybook: ${esc(unresolved.join(', '))}</span><br>` : ''}
-          ${gotoFiles.length ? `<span class="warn">⚠ GO TO usage (spaghetti risk): ${esc(gotoFiles.join(', '))}</span><br>` : ''}
-          ${g.programs.some(p=>p.parsed.sqlCount>0) ? `<span class="warn">⚠ Embedded SQL detected (DB2 dependencies)</span><br>` : ''}
+          ${!parseWarns && !m.warnings.length ? '<span class="ok">✓ No parse warnings</span><br>' : ''}
+          ${byT('cpy').length && !missingCpy ? '<span class="ok">✓ All copybooks resolved</span><br>' : ''}
+          ${missingCpy ? `<span class="warn">⚠ ${missingCpy} copybook reference(s) not uploaded</span><br>` : ''}
+          ${dynCalls ? `<span class="warn">⚠ ${dynCalls} dynamic CALL(s) with unresolvable target</span><br>` : ''}
+          ${unknownDs ? `<span class="warn">⚠ ${unknownDs} dataset usage(s) unclear (no DISP, no matching program)</span><br>` : ''}
+          ${ext ? `<span class="warn">⚠ ${ext} external program(s) not uploaded</span><br>` : ''}
+          ${byT('tbl').length ? `<span class="warn">⚠ DB2 dependencies detected (${byT('tbl').length} table(s))</span><br>` : ''}
         </div></div>
     </div>`;
   },
 
   python: () => {
-    if (!state.loaded) return emptyState('⚡','COBOL → Python Translation','Analyze a COBOL file, then select it here to generate equivalent Python code via AI.');
-    const g = buildGraph();
-    if (!g.programs.length) return emptyState('⚡','No COBOL program found','Drop COBOL files to enable translation.');
-    if (!state.pySel || !g.programs.some(p=>p.parsed.programId===state.pySel)) state.pySel = g.programs[0].parsed.programId;
-    const p = g.programs.find(p=>p.parsed.programId===state.pySel);
-    const src = firstLines(p.text, 40);
-    const isSample = !!p.sample && p.parsed.programId === 'CBPAY100';
-    return `
-    <div class="toolbar">${g.programs.map(x=>`<span class="subtab ${x.parsed.programId===state.pySel?'active':''}" onclick="state.pySel='${x.parsed.programId}';renderContent()">${esc(x.parsed.programId)}</span>`).join('')}</div>
-    <div class="code-cols">
-      <div><h3 style="font-size:13px;margin-bottom:8px">COBOL — ${esc(state.pySel)}</h3>
-        <div class="codeblock">${hl(src)}</div></div>
-      <div>
-        <h3 style="font-size:13px;margin-bottom:8px">⚡ Python (AI-generated)</h3>
-        ${isSample ? `<div class="codeblock"><span class="c"># Compute gross pay</span>
-gross_pay = <span class="n">round</span>(hours * rate)
-
-<span class="k">if</span> gross_pay &gt; <span class="n">5000.00</span>:
-    gross_pay = <span class="n">5000.00</span>
-
-total += gross_pay</div>
-        <p class="note">🔑 Requires an Anthropic API key — <b>stored locally, never sent to our servers.</b> AI output is a comprehension aid, not production-ready code.</p>
-        <div style="margin-top:10px">${keyStatusHTML()}</div>`
-        : `<div class="key-panel"><div class="kp-icon">🔑</div>
-           <p><b>AI translation runs in the full analyzer</b> with your own Anthropic API key (stored locally, never sent to our servers).<br><br>This prototype renders a sample translation only for the demo program CBPAY100.</p>
-           ${keyStatusHTML()}
-           <p class="note">AI output is a comprehension aid, not production-ready code.</p></div>`}
-      </div>
-    </div>`;
+    if (!state.loaded) return emptyState('⚡','COBOL → Python Translation','Real AI translation with a model API — planned next phase.');
+    const progs = state.files.filter(f=>f.lang==='CBL' && f.parsed.cobol);
+    if (!progs.length) return emptyState('⚡','No COBOL program found','Drop COBOL files to enable translation.');
+    return progs.map(f=>{
+      const C = f.parsed.cobol;
+      return `<div class="card" style="max-width:700px;margin-bottom:14px">
+        <h3>⚡ ${esc(C.programId || f.name)}</h3>
+        <p class="note">Real v3 analysis: ${C.paragraphs.length} paragraph(s) · ${C.vars.length} data item(s) · ${C.copyUsed.length} COPY reference(s) · ${C.selects.length} SELECT · ${C.sql.length} SQL block(s) · ${C.calls.length} CALL</p>
+        <p class="note" style="color:var(--yellow)">AI translation is not implemented yet. The next phase will connect a model API and validate the generated Python (static checks + test scaffolding). No simulated output is shown, because none is produced.</p>
+      </div>`;
+    }).join('');
   },
 
   ai: () => {
-    if (!state.loaded) return emptyState('✦','AI System Explanation','Run analysis to enable AI-powered system understanding.');
-    const g = buildGraph();
-    const isSample = state.files.some(f=>f.sample);
-    if (isSample) return `
-      <div class="card" style="max-width:700px">
-        <h3>✦ AI explanation — PAYRUN0 system</h3>
-        <p class="note" style="font-size:13px;line-height:1.7;color:var(--text2)">
-        “This is a classic z/OS payroll batch job. STEP010 sorts the daily transactions file so records are processed
-        in account order. STEP020 (CBPAY100) computes gross pay for each transaction and enriches records from the
-        customer master file via copybook PAYREC.CPY. STEP030 (CBPAY200) applies deductions, writes the payroll
-        master file and posts history rows to DB2. Because both programs share the record layout, any change to
-        PAYREC.CPY requires recompiling both — see the Impact tab.”</p>
-        <p class="note">Generated locally with your own API key.</p>
-        <div style="margin-top:10px">${keyStatusHTML()}</div>
-      </div>`;
+    if (!state.loaded) return emptyState('✦','AI System Explanation','Run analysis first.');
+    const m = getModel();
+    const byT = t=>[...m.nodes.values()].filter(n=>n.type===t).length;
     return `<div class="card" style="max-width:700px">
       <h3>✦ AI System Explanation</h3>
       <p class="note" style="font-size:13px;line-height:1.7;color:var(--text2)">
-      Your system contains ${g.jobs.length} job(s), ${g.programs.length} program(s), ${g.copybooks.length} copybook(s) and ${g.datasets.length} dataset(s).
-      The full analyzer sends this structure (never your source code) to Claude with your own API key to generate a
-      plain-English explanation of what the system does and how the pieces connect.</p>
-      <div class="key-panel" style="margin-top:12px"><div class="kp-icon">🔑</div><p>AI explanation runs in the full analyzer with your locally-stored Anthropic API key. This prototype shows the static sample output only.</p>${keyStatusHTML()}</div>
+      Not implemented yet. The next phase will call a model API (with your locally-stored key, sessionStorage —
+      never sent to any server other than the model provider) and ground every answer in the real dependency graph:
+      ${byT('job')} job(s), ${byT('prog')} program(s), ${byT('cpy')} copybook(s), ${byT('ds')} dataset(s), ${byT('tbl')} DB2 table(s),
+      ${m.edges.length} relation(s) — with evidence lines and confidence levels. Answers will cite their sources;
+      anything unproven will be labeled as such. No hardcoded explanation is displayed, because none is generated.</p>
+      <div style="margin-top:10px">${keyStatusHTML()}</div>
     </div>`;
   },
 
   source: () => {
     if (!state.loaded) return emptyState('📄','No source loaded','Select a file from the list to view its syntax-highlighted content.');
-    if (!state.srcFile || !state.files.some(f=>f.name===state.srcFile)) state.srcFile = state.files[0].name;
-    const f = state.files.find(f=>f.name===state.srcFile);
+    if (state.srcIdx==null || !state.files[state.srcIdx]) state.srcIdx = 0;
+    const f = state.files[state.srcIdx];
     return `
-    <div class="toolbar">${state.files.map(x=>`<span class="subtab ${x.name===state.srcFile?'active':''}" onclick="state.srcFile='${x.name}';renderContent()">${esc(x.name)}</span>`).join('')}</div>
+    <div class="toolbar">${state.files.map((x,i)=>`<span class="subtab ${i===state.srcIdx?'active':''}" onclick="state.srcIdx=${i};renderContent()">${esc(x.name)}</span>`).join('')}</div>
     <div class="codeblock">${hl(firstLines(f.text, 300))}</div>`;
   },
 
   copybooks: () => {
     if (!state.loaded) return emptyState('📋','No copybooks detected','Upload .CPY files alongside your COBOL programs.');
-    const g = buildGraph();
-    const unresolved = [];
-    g.programs.forEach(p=>p.parsed.copies.forEach(c=>{
-      if (!g.copybooks.some(cb=>base(cb.name)===c || c.indexOf(base(cb.name))===0)) unresolved.push(`${p.parsed.programId} → ${c}`);
-    }));
-    if (!g.copybooks.length && !unresolved.length) return emptyState('📋','No copybooks detected','Upload .CPY files alongside your COBOL programs.');
+    const m = getModel();
+    const cpyNodes = [...m.nodes.values()].filter(n=>n.type==='cpy');
+    const unresolved = m.warnings.filter(w=>w.includes('not uploaded'));
+    if (!cpyNodes.length && !unresolved.length) return emptyState('📋','No copybooks detected','Upload .CPY files alongside your COBOL programs.');
     let html = '';
-    if (g.copybooks.length){
+    if (cpyNodes.length){
       html += `<div class="card" style="max-width:680px;margin-bottom:14px"><table class="tbl">
-        <tr><th>Copybook</th><th>Used by</th></tr>
-        ${g.copybooks.map(cb=>{
-          const users = g.programs.filter(p=>p.parsed.copies.some(c=>base(cb.name)===c || c.indexOf(base(cb.name))===0)).map(p=>p.parsed.programId).join(', ');
-          return `<tr><td>${esc(base(cb.name))}</td><td>${esc(users||'—')}</td></tr>`;
+        <tr><th>Copybook</th><th>Used by</th><th>Evidence</th></tr>
+        ${cpyNodes.map(c=>{
+          const eds = m.rev[c.id]||[];
+          return `<tr><td>${esc(c.name)}</td><td>${eds.map(e=>esc(nodeLabel(e.f))).join('<br>')||'—'}</td><td class="note">${eds.map(e=>esc(e.ev[0]?e.ev[0].file+' L'+e.ev[0].ln:'')).join('<br>')}</td></tr>`;
         }).join('')}
       </table></div>`;
     }
     if (unresolved.length){
       html += `<div class="card" style="max-width:680px"><h3>⚠ Unresolved copy references</h3>
       <div class="log">${unresolved.map(u=>`<span class="warn">[missing] ${esc(u)}</span>`).join('<br>')}</div>
-      <p class="note">Upload the matching .CPY files to resolve these layouts and compute recompile impact.</p></div>`;
+      <p class="note">Upload the matching .CPY files to resolve these layouts and compute recompile impact. The affected programs are flagged, not silently ignored.</p></div>`;
     }
     return html;
   },
 
   debug: () => {
-    if (!state.loaded) return emptyState('🔬','No analysis run yet','The parsing log (JCL + COBOL) will appear here.');
-    return `<div class="card log" style="max-width:680px">
-      ${state.log.map(l=>`<div><span class="${l.cls}">${l.text}</span></div>`).join('')}
-    </div>`;
+    const testArea = state._testResults ? `<div class="card" style="max-width:760px;margin-bottom:14px">
+      <h3>Engine self-tests: ${state._testResults.filter(t=>t.pass).length}/${state._testResults.length} passed</h3>
+      <div class="log">${state._testResults.map(t=>`<span class="${t.pass?'ok':'warn'}">${t.pass?'✓':'✗'} ${esc(t.name)}</span>`).join('<br>')}</div>
+    </div>` : '';
+    const v2Area = state._v2Results ? `<div class="card" style="max-width:760px;margin-bottom:14px">
+      <h3>V2 suite (FD/01, continuations, SQL, JCL, graphe, XSS): ${state._v2Results.filter(t=>t.pass).length}/${state._v2Results.length} passed</h3>
+      <div class="log">${state._v2Results.map(t=>`<span class="${t.pass?'ok':'warn'}">${t.pass?'✓':'✗'} ${esc(t.name)}</span>`).join('<br>')}</div>
+    </div>` : '';
+    const logArea = state.loaded ? `<div class="card log" style="max-width:760px">
+      ${state.log.map(l=>`<div><span class="${l.cls}">${esc(l.text)}</span></div>`).join('')}
+    </div>` : emptyState('🔬','No analysis run yet','The parsing log (JCL + COBOL v3) and the engine self-tests will appear here.');
+    return `
+    <div class="toolbar">
+      <button class="analyze-btn" style="width:auto" onclick="state._testResults=runSelfTests();renderContent()">⚙ Engine self-tests</button>
+      <button class="analyze-btn" style="width:auto" onclick="state._v2Results=runV2Tests();renderContent()">⚙ V2 suite (FD/01, SQL, JCL, XSS)</button>
+      <button class="analyze-btn" style="width:auto" onclick="toggleTelemetry()">${telemetryOn() ? '📡 Telemetry ON' : '📡 Telemetry OFF (opt-in)'}</button>
+    </div>
+    ${testArea}
+    ${v2Area}
+    ${logArea}
+    <div class="card" style="max-width:760px;margin-top:14px"><h3>Known limits (documented, not hidden)</h3><p class="note" style="line-height:1.8">
+      • Dynamic SQL (PREPARE/EXECUTE): statement text unknown → no table extracted, explicit warning.<br>
+      • Cataloged PROCs / INCLUDE members: resolved only if uploaded in the project.<br>
+      • Literal continuation: resumed at the apostrophe; column 16-71 spaces of the first line are not re-padded.<br>
+      • CICS (EXEC CICS) and REXX: not analyzed — no relation invented.<br>
+      • PERFORM/GOTO to an undefined target: flagged as warning, no edge created.<br>
+      • AI: not implemented — no simulated output.<br>
+      • Telemetry: OFF by default (opt-in above). Source files never leave the browser (IndexedDB local, export by your action only).</p></div>`;
   },
 };
 
 function renderContent(){
   const c = document.getElementById('content');
-  c.innerHTML = PANELS[state.sub] ? PANELSstate.sub : emptyState('…','Coming soon','');
+  c.innerHTML = PANELS[state.sub] ? PANELS[state.sub]() : emptyState('…','Coming soon','');
 }
 
 // ══════════════════ 7. NAVIGATION ══════════════════
@@ -1268,6 +2357,10 @@ const SAMPLE_FILES = [
   { name:'CBPAY100.CBL', lang:'CBL', lines:24, sample:true,
     text:`IDENTIFICATION DIVISION.
 PROGRAM-ID. CBPAY100.
+ENVIRONMENT DIVISION.
+INPUT-OUTPUT SECTION.
+FILE-CONTROL.
+    SELECT TRANS-FILE ASSIGN TO TRANS.
 DATA DIVISION.
 FILE SECTION.
 FD  TRANS-FILE.
@@ -1286,11 +2379,19 @@ STOP RUN.`,
   { name:'CBPAY200.CBL', lang:'CBL', lines:19, sample:true,
     text:`IDENTIFICATION DIVISION.
 PROGRAM-ID. CBPAY200.
+ENVIRONMENT DIVISION.
+INPUT-OUTPUT SECTION.
+FILE-CONTROL.
+    SELECT PAYMAST-FILE ASSIGN TO PAYMAST.
 DATA DIVISION.
+FILE SECTION.
+FD  PAYMAST-FILE.
+01  PAYMAST-REC.
 WORKING-STORAGE SECTION.
 COPY PAYREC.
 PROCEDURE DIVISION.
 MAIN-PARA.
+    OPEN INPUT PAYMAST-FILE.
     EXEC SQL DECLARE C1 CURSOR FOR
         SELECT ACC_ID, BALANCE FROM PAYROLL.ACCOUNTS
         WHERE STATUS = 'A'
@@ -1300,6 +2401,7 @@ MAIN-PARA.
     EXEC SQL UPDATE PAYROLL.PAYHIST
         SET PAID = :WS-PAID-FLAG END-EXEC.
 CAP-PARA.
+    READ PAYMAST-FILE.
     STOP RUN.`,
     parsed:{ programId:'CBPAY200', copies:['PAYREC'], sqlCount:2, performs:0, gotos:1 } },
   { name:'PAYREC.CPY', lang:'CPY', lines:6, sample:true,
@@ -1321,6 +2423,25 @@ function loadSample(){
   buildLog();
   saveSession(); track('load_sample');
   renderLeft(); renderNav(); renderContent();
+}
+
+// ── Télémétrie (Google Analytics) : OFF par défaut, opt-in explicite ──
+// Aucun script externe n'est chargé avant consentement ; état persisté en localStorage.
+function telemetryOn(){ try { return localStorage.getItem('reforge_telemetry') === '1'; } catch(e){ return false; } }
+function toggleTelemetry(){
+  const on = !telemetryOn();
+  try { localStorage.setItem('reforge_telemetry', on ? '1' : '0'); } catch(e){}
+  if (on && typeof gtag !== 'function' && !document.getElementById('gtag-js')){
+    try {
+      const s = document.createElement('script');
+      s.id = 'gtag-js'; s.async = true; s.src = 'https://www.googletagmanager.com/gtag/js?id=G-TMZLXLY7BC';
+      document.head.appendChild(s);
+      window.dataLayer = window.dataLayer || [];
+      window.gtag = function(){ window.dataLayer.push(arguments); };
+      gtag('js', new Date()); gtag('config', 'G-TMZLXLY7BC');
+    } catch(e){}
+  }
+  renderContent();
 }
 
 // ══════════════════ 10. WIRING ══════════════════
@@ -1351,6 +2472,14 @@ try {
 } catch(e){}
 
 renderLeft(); renderNav(); renderContent();
+
+// ── Self-tests automatiques via ?selftest (CI / vérification rapide) ──
+if (location.search.indexOf('selftest') >= 0){
+  state._testResults = runSelfTests();
+  state._v2Results = runV2Tests();
+  state.group = 'tech'; state.sub = 'debug';
+  renderNav(); renderContent();
+}
 
 // ── Restauration de session (IndexedDB) — « Welcome back » ──
 (async () => {
