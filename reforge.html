@@ -170,7 +170,7 @@
 
   ::-webkit-scrollbar{width:9px;height:9px} ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:5px} ::-webkit-scrollbar-track{background:transparent}
 </style>
-<!-- Télémétrie Google Analytics : désactivée par défaut. Opt-in via Debug → bouton Telemetry. Aucun chargement externe avant consentement explicite. -->
+<!-- Télémétrie Google Analytics : ON par défaut (usage anonymisé uniquement, jamais de code source). Désactivable via Debug → bouton Telemetry, choix persisté. -->
 </head>
 <body>
 
@@ -236,6 +236,8 @@ function detectLang(name, text){
   const t = text.toUpperCase();
   if (ext === 'JCL') return 'JCL';
   if (ext === 'CPY' || ext === 'COPY') return 'CPY';
+  if (ext === 'REX' || ext === 'EXEC') return 'REXX';
+  if (/^\s*\/\*\s*REXX/i.test(text)) return 'REXX';
   if (/\bIDENTIFICATION DIVISION\b/.test(t) || /\bPROGRAM-ID\b/.test(t)) return 'CBL';
   if (/^\s*\/\//m.test(t) && /\b(EXEC|PROC|JOB|DD)\b/.test(t)) return 'JCL';
   if (/\bPIC(TURE)?\s+[S9VX]/i.test(text) && !/\bPROCEDURE DIVISION\b/.test(t)) return 'CPY';
@@ -257,21 +259,21 @@ const JCL_OPS = new Set([
   'OUTPUT', 'INCLUDE', 'JCLLIB', 'COMMAND', 'XMIT', 'CNTL', 'ENDCNTL', 'EXPORT',
 ]);
 const EXEC_STD_PARAMS = new Set([
-  'PGM', 'PROC', 'PARM', 'COND', 'TIME', 'REGION', 'ADDRSPC', 'DYNAMNBR',
+  'PGM', 'PROC', 'PARM', 'COND', 'RD', 'TIME', 'REGION', 'ADDRSPC', 'DYNAMNBR',
   'CLASS', 'MSGCLASS', 'MSGLEVEL', 'NOTIFY', 'USER', 'PASSWORD', 'TYPRUN', 'ACCT',
 ]);
 
 function tokenizeStatements(text, warnings){
   const statements = [];
   const lines = text.split(/\r?\n/);
-  let inStreamData = false;
+  let inStreamData = false, curInline = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].slice(0, 72).trimEnd();
     const ln = i + 1;
     if (!line.trim()) continue;
     if (inStreamData) {
-      if (line.startsWith('/*') || line.startsWith('//')) inStreamData = false;
-      else continue;
+      if (line.startsWith('/*') || line.startsWith('//')) { inStreamData = false; curInline = null; }
+      else { if (curInline) curInline.push({ ln, text: line }); continue; }
     }
     if (line.startsWith('/*')) continue;
     if (line.startsWith('//*')) continue;
@@ -311,7 +313,7 @@ function tokenizeStatements(text, warnings){
       }
     }
     const st = { name, op, operands: operands.trim(), line: ln };
-    if (op === 'DD' && /^(\*|DATA\b)/.test(operands.trim())) inStreamData = true;
+    if (op === 'DD' && /^(\*|DATA\b)/.test(operands.trim())) { inStreamData = true; curInline = st.inline = []; }
     statements.push(st);
   }
   return statements;
@@ -451,6 +453,88 @@ function resolveIncludes(stmts, members, stack, warns){
   return out;
 }
 
+// ── Cartes SORT (DFSORT) : analyse honnête des cartes SYSIN, sans invention ──
+function parseSortCards(text){
+  const info = { type: null, fields: [], format: null, sum: null, decoded: false };
+  const cards = (text || '').toUpperCase().split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('*'));
+  const fmtCard = cards.find(c => /FORMAT\s*=/.test(c));
+  if (fmtCard){ const fm = fmtCard.match(/FORMAT\s*=\s*([A-Z0-9]+)/); if (fm) info.format = fm[1]; }
+  for (const card of cards){
+    if (/^SORT\b/.test(card) && /FIELDS\s*=\s*COPY\b/.test(card)){ info.type = 'copy'; info.decoded = true; continue; }
+    const m = (/^SORT\b/.test(card) && card.match(/FIELDS\s*=\s*\(([^)]*)\)/));
+    if (m){
+      info.type = 'sort';
+      const fm = card.match(/FORMAT\s*=\s*([A-Z0-9]+)/);
+      if (fm) info.format = fm[1];
+      const toks = m[1].split(',').map(s => s.trim()).filter(Boolean);
+      if (toks.length % 4 === 0 && toks.every((t, i) => (i % 4 === 2) ? /^(CH|ZD|PD|BI|FS|AC)$/.test(t) : (i % 4 === 3) ? /^[ABD]$/.test(t) : /^\d+$/.test(t))){
+        for (let i = 0; i < toks.length; i += 4) info.fields.push({ pos: +toks[i], len: +toks[i+1], type: toks[i+2], order: toks[i+3] });
+      } else if (info.format && toks.length % 3 === 0 && toks.every((t, i) => (i % 3 === 2) ? /^[ABD]$/.test(t) : /^\d+$/.test(t))){
+        // forme courte : (p,l,ordre,...) avec FORMAT= global
+        for (let i = 0; i < toks.length; i += 3) info.fields.push({ pos: +toks[i], len: +toks[i+1], type: info.format, order: toks[i+2] });
+      }
+      if (info.fields.length) info.decoded = true;
+      continue;
+    }
+    if (/^SUM\s+FIELDS\s*=\s*NONE\b/.test(card)){ info.sum = 'none'; continue; }
+    const sm = card.match(/^SUM\s+FIELDS\s*=\s*(\([^)]*\)|[A-Z0-9,=]+)/);
+    if (sm){ info.sum = sm[1]; continue; }
+    // INCLUDE/OMIT/INREC/OUTREC/OUTFIL/OPTION/RECORD/END : reconnues, non décodées (documenté)
+    if (/^(INCLUDE|OMIT|INREC|OUTREC|OUTFIL|OPTION|RECORD|MODS|DEBUG|END)\b/.test(card)) continue;
+  }
+  return info;
+}
+
+// ── REXX : analyse minimale honnête — CALL littéral, CALL via variable, datasets cités ──
+function parseREXX(fname, text){
+  const R = { execName: null, calls: [], dsns: [], warns: [] };
+  const nm = text.match(/\/\*\s*REXX\s+([A-Z0-9\-@#$.]+)/i);
+  R.execName = (nm ? nm[1] : base(fname)).toUpperCase();
+  const lines = text.split(/\r?\n/);
+  // libellés internes : LABEL: — pour ne pas prendre un saut interne pour un appel externe
+  const labels = new Set();
+  lines.forEach(raw => { const lm = raw.match(/^\s*([A-Z][A-Z0-9\-@#$]*)\s*:\s*$/i); if (lm) labels.add(lm[1].toUpperCase()); });
+  // code hors commentaires bloc /* */ (non imbriqués), littérales '...' conservées
+  let inCmt = false;
+  const codeAt = [];
+  lines.forEach((raw, idx) => {
+    let l = raw, out = '';
+    while (l.length){
+      if (inCmt){
+        const e = l.indexOf('*/');
+        if (e < 0){ l = ''; break; }
+        l = l.slice(e + 2); inCmt = false;
+      } else {
+        const s = l.search(/\/\*|'/);
+        if (s < 0){ out += l; break; }
+        if (l[s] === "'"){
+          out += l.slice(0, s);
+          let j = s + 1;
+          while (j < l.length){ if (l[j] === "'"){ if (l[j+1] === "'"){ j += 2; continue; } break; } j++; }
+          out += l.slice(s, Math.min(j + 1, l.length)); l = l.slice(Math.min(j + 1, l.length));
+        } else { out += l.slice(0, s); l = l.slice(s + 2); inCmt = true; }
+      }
+    }
+    if (out.trim()) codeAt.push({ ln: idx + 1, code: out });
+  });
+  const SEG = '[A-Z0-9\\-#@]{1,8}';
+  codeAt.forEach(({ ln, code }) => {
+    const U = code.toUpperCase();
+    let m;
+    const callRe = /\bCALL\s+(?:'([^']*)'|([A-Z][A-Z0-9\-@#$.]*))/g;
+    while ((m = callRe.exec(U))){
+      if (m[1] !== undefined){ if (m[1].trim()) R.calls.push({ target: m[1].trim(), quoted: true, ln }); }
+      else if (m[2] === 'ON' || m[2] === 'OFF') continue;         // CALL ON/OFF condition — pas un appel
+      else if (labels.has(m[2])) continue;                         // libellé interne
+      else R.calls.push({ viaVar: m[2], ln });                     // CALL variable — cible inconnue
+    }
+    const dsnRe = new RegExp("'(" + SEG + "(?:\\." + SEG + ")+)(\\([A-Z0-9\\-#@$.]+\\))?'", 'g');
+    while ((m = dsnRe.exec(U))) R.dsns.push({ name: m[1], member: m[2] ? m[2].slice(1, -1) : null, ln });
+  });
+  R.dsns = [...new Map(R.dsns.map(d => [d.name, d])).values()]; // dédoublonnés, premier n° de ligne gardé
+  return R;
+}
+
 function parseJCL(text, members){
   const warnings = [];
   const stmts = resolveIncludes(tokenizeStatements(text, warnings), members || {}, [], warnings);
@@ -499,6 +583,9 @@ function parseJCL(text, members){
           condition: condStack.length ? { ...condStack[condStack.length - 1] } : null,
           dds: [], overrides: {}, symbols: {},
         };
+        // phase 4 : COND= (test de retour) et RD= (restart) — capturés, jamais perdus
+        if (p.COND !== undefined && p.COND !== true) step.cond = String(p.COND).toUpperCase();
+        if (p.RD !== undefined && p.RD !== true) step.rd = String(p.RD).toUpperCase();
         if (target) step.target = substitute(String(target), globalSymbols).toUpperCase();
         for (const [k, v] of Object.entries(p)) {
           if (k === 'PGM' || k === 'PROC') continue;
@@ -514,7 +601,9 @@ function parseJCL(text, members){
         const owner = procDef ? procDef.steps : (job ? job.steps : []);
         const step = owner[owner.length - 1];
         if (!step) { warnings.push(`L${st.line}: DD outside of step ignored`); break; }
-        step.dds.push(buildDD(st, parseParams(st.operands), globalSymbols));
+        const dd = buildDD(st, parseParams(st.operands), globalSymbols);
+        if (st.inline && st.inline.length) dd.inline = st.inline; // cartes in-stream capturées (SORT, SYSTSIN…)
+        step.dds.push(dd);
         break;
       }
       case 'IF':
@@ -539,6 +628,44 @@ function parseJCL(text, members){
         warnings.push(`L${st.line}: unknown operation ${st.op}`);
     }
   }
+  // ── Post-pass phase 3 : cartes SORT (PGM=SORT/ICEMAN) + EXEC REXX/CLIST (IKJEFT01) ──
+  const allSteps = [];
+  result.jobs.forEach(jb => (jb.steps || []).forEach(s => allSteps.push(s)));
+  Object.values(result.procs).forEach(p => (p.steps || []).forEach(s => allSteps.push(s)));
+  allSteps.forEach(st => {
+    if (st.kind !== 'PGM') return;
+    const dds = st.dds || [];
+    const target = String(st.target || '').toUpperCase();
+    if (target === 'SORT' || target === 'ICEMAN' || target === 'DFSORT'){
+      const sysin = dds.find(d => d.ddname === 'SYSIN');
+      if (sysin && sysin.inline && sysin.inline.length){
+        st.sortInfo = parseSortCards(sysin.inline.map(l => l.text).join('\n'));
+        if (st.sortInfo.type === 'sort' && !st.sortInfo.decoded)
+          warnings.push(`L${st.line}: SORT step ${st.name}: cards present but fields not decoded (unusual form) — shown as undecoded`);
+      } else if (sysin && sysin.name){
+        warnings.push(`L${st.line}: SORT step ${st.name}: SYSIN is a dataset (DSN=${sysin.name}) not uploaded — sort fields unknown`);
+      } else {
+        warnings.push(`L${st.line}: SORT step ${st.name}: no SYSIN cards captured — sort fields unknown`);
+      }
+    }
+    if (target === 'IKJEFT01' || target === 'IKJEFT01B'){
+      const sysin = dds.find(d => d.ddname === 'SYSTSIN');
+      if (sysin && sysin.inline && sysin.inline.length){
+        const txt = sysin.inline.map(l => l.text).join('\n');
+        const m = txt.toUpperCase().match(/EXEC\s+'?([A-Z0-9\-@#$.]+(?:\([A-Z0-9\-@#$.]+\))?)/);
+        if (m){
+          let member = m[1];
+          const dm = member.match(/^([A-Z0-9\-@#$.]+)\(([A-Z0-9\-@#$.]+)\)$/);
+          if (dm) member = dm[2]; // EXEC 'dsn(member)' → membre
+          st.rexxExec = member;
+        } else {
+          warnings.push(`L${st.line}: IKJEFT01 step ${st.name}: SYSTSIN present but no EXEC 'member' found — executed member unknown`);
+        }
+      } else if (sysin && sysin.name){
+        warnings.push(`L${st.line}: IKJEFT01 step ${st.name}: SYSTSIN is a dataset (DSN=${sysin.name}) not uploaded — executed member unknown`);
+      }
+    }
+  });
   linkProcs(result);
   return result;
 }
@@ -881,19 +1008,25 @@ function sqlParse(C, s){
 // Chaque commande est enregistrée avec sa référence littérale. FILE(WS-VAR)
 // (valeur inconnue au parse) et les commandes sans accès aux données (RETURN,
 // HANDLE, ASSIGN...) restent silencieuses : aucune arête, aucun faux positif.
-function cicsParse(C, s){
+function cicsParse(C, s, para){
   const raw = s.text.replace(/^\s*EXEC\s+CICS/i,'').replace(/\bEND-EXEC\b\.?\s*$/i,'').trim();
   const U = raw.toUpperCase();
   const w = tkWords(U);
   const cmd = w[0];
-  const e = { cmd, op: null, file: null, queue: null, qtype: null, map: null, program: null,
-    ln: s.ln, silent: false, text: raw.slice(0, 200) };
+  const e = { cmd, op: null, file: null, fileVar: null, fileViaVar: false, queue: null, qtype: null, map: null, program: null, handles: null,
+    para: para || null, ln: s.ln, silent: false, text: raw.slice(0, 200) };
   const lit = re => { const m2 = U.match(re); return m2 ? m2[1] : null; };
   if (['READ','WRITE','REWRITE','UPDATE','DELETE'].includes(cmd)){
     e.op = cmd === 'READ' ? 'read' : cmd === 'WRITE' ? 'write' : (cmd === 'REWRITE' || cmd === 'UPDATE') ? 'update' : 'delete';
     e.file = lit(/\b(?:FILE|DATASET)\s*\(\s*'([^']*)'\s*\)/);
     if (e.file) C.cicsFiles[e.file] = [...(C.cicsFiles[e.file]||[]), { op: e.op, ln: s.ln, cics: cmd, cicsFile: e.file }];
-    else e.silent = true; // FILE(variable) : valeur inconnue → aucune arête, rien inventé
+    else {
+      // FILE(variable) : valeur tracée depuis les MOVE 'X' TO var / niveaux 88 dans resolveOps ;
+      // si aucune constante vue → aucune arête, avertissement explicite, rien inventé.
+      const vm = U.match(/\b(?:FILE|DATASET)\s*\(\s*([A-Z0-9\-]+)\s*\)/);
+      e.fileVar = vm ? vm[1] : null;
+      e.silent = true;
+    }
   } else if (cmd === 'READQ' || cmd === 'WRITEQ' || cmd === 'DELETEQ'){
     e.op = cmd === 'READQ' ? 'read' : cmd === 'WRITEQ' ? 'write' : 'delete';
     e.qtype = (w[1] === 'TS' || w[1] === 'TD') ? w[1] : null;
@@ -905,8 +1038,16 @@ function cicsParse(C, s){
   } else if (['XCTL','LINK','CALL','TRANSFER'].includes(cmd)){
     e.program = lit(/\bPROGRAM\s*\(\s*'([^']*)'\s*\)/);
     if (!e.program) e.silent = true; // PROGRAM(variable) : cible inconnue → aucune arête
+  } else if (cmd === 'HANDLE'){
+    // HANDLE CONDITION err(PARA) ... / HANDLE AID ENTER(PARA) ... / HANDLE ABEND PROGRAM('X')
+    e.handles = [];
+    const hre = /([A-Z][A-Z0-9\-]*)\s*\(\s*([A-Z0-9\-]+)\s*\)/g;
+    let hm;
+    while ((hm = hre.exec(U))) e.handles.push({ key: hm[1], to: hm[2] });
+    e.program = lit(/\bPROGRAM\s*\(\s*'([^']*)'\s*\)/);   // HANDLE ABEND PROGRAM('X')
+    e.silent = !(e.handles.length || e.program);
   } else {
-    e.silent = true; // RETURN/HANDLE/AID/ASSIGN/GETMAIN... : pas d'accès aux données, aucun bruit
+    e.silent = true; // RETURN/IGNORE/ASSIGN/GETMAIN... : pas d'accès aux données, aucun bruit
   }
   C.cics.push(e);
 }
@@ -1016,6 +1157,21 @@ function resolveOps(C){
   // EXEC CICS FILE('X') : X peut être le nom COBOL du fichier, son DDNAME
   // (SELECT ASSIGN) ou un record — sinon entrée FCT : dataset inconnu, la
   // référence reste un nœud 'fct' dans le modèle, aucune relation inventée.
+  // FILE(variable) : la valeur est tracée depuis les MOVE 'X' TO var /
+  // niveaux 88 (comme resolveCalls pour les CALL dynamiques). Résolu →
+  // 'probable' (valeur dynamique) ; aucune constante vue → aucune arête + warn.
+  C.cics.forEach(x => {
+    if (x.fileVar && !x.file){
+      const lits = C.varLits[x.fileVar];
+      if (lits && lits.length){
+        x.file = lits[0];
+        x.fileViaVar = true;
+        C.cicsFiles[x.file] = [...(C.cicsFiles[x.file] || []), { op: x.op, ln: x.ln, cics: x.cmd, cicsFile: x.file, viaVar: x.fileVar }];
+      } else {
+        C.warns.push(`line ${x.ln}: EXEC CICS ${x.cmd} FILE(${x.fileVar}) — variable value unknown → no edge created (nothing invented)`);
+      }
+    }
+  });
   const cicsToFile = Object.assign({}, recToFile);
   C.selects.forEach(sl => { cicsToFile[sl.dd] = sl.file; });
   for (const [cf, ops] of Object.entries(C.cicsFiles || {})){
@@ -1043,7 +1199,8 @@ function resolveCalls(C){
 
 function parseCOBOL(file, text, registry){
   const C = { file, programId: null, divisions: [], sections: [], paragraphs: [], vars: [], selects: [],
-    fds: [], performs: [], gotos: [], calls: [], sql: [], cics: [], cicsFiles: {}, fileOps: {}, varLits: {}, copyUsed: [], warns: [] };
+    fds: [], performs: [], gotos: [], calls: [], sql: [], cics: [], cicsFiles: {}, fileOps: {}, varLits: {}, copyUsed: [], warns: [],
+    flowLast: null, dead: [], _decl: false, _alter: false };
   const li = cobLogicalItems(text, C.warns);
   C.fixed = cobDetectFixed(text);
   const sents0 = cobSentences(li.items);
@@ -1063,7 +1220,7 @@ function parseCOBOL(file, text, registry){
       continue;
     }
     if (s.t === 'cics'){
-      if (div === 'PROCEDURE' || div === null) cicsParse(C, s);
+      if (div === 'PROCEDURE' || div === null) cicsParse(C, s, para);
       else C.warns.push(`line ${s.ln}: EXEC CICS outside PROCEDURE DIVISION — ignored`);
       continue;
     }
@@ -1073,7 +1230,7 @@ function parseCOBOL(file, text, registry){
     const v = w[0];
 
     // divisions
-    if (/DIVISION\.$/.test(t.toUpperCase()) && ['IDENTIFICATION','ENVIRONMENT','DATA','PROCEDURE'].includes(v)){
+    if (/DIVISION\.$/.test(t.toUpperCase()) && ['IDENTIFICATION','ID','ENVIRONMENT','DATA','PROCEDURE'].includes(v)){
       div = v === 'ID' ? 'IDENTIFICATION' : v;
       C.divisions.push({ name: div, ln: s.ln });
       sec = null; para = null; curFd = null;
@@ -1082,7 +1239,7 @@ function parseCOBOL(file, text, registry){
     // PROGRAM-ID (peut être suivi du nom sur la phrase suivante si point isolé)
     // PROGRAM-ID — le point peut suivre directement le mot-clé ("PROGRAM-ID. X.")
     if (/^PROGRAM-ID\b/i.test(t)){
-      const m = t.match(/PROGRAM-ID[.]?\s+([A-Z0-9\-]+)/i);
+      const m = t.match(/PROGRAM-ID[.]?\s+'?([A-Z0-9\-]+)'?/i);
       if (m && !/^DIVISION/i.test(m[1])) C.programId = m[1].toUpperCase();
       else if (!m) pendingId = true;
       continue;
@@ -1131,13 +1288,33 @@ function parseCOBOL(file, text, registry){
       levelEntry(C, w, s.ln, sec, sec === 'FILE-SECTION' ? curFd : null);
       continue;
     }
+    // DECLARATIVES (gestionnaires USE implicites) — désactive l'analyse code mort
+    if (div === 'PROCEDURE' && v === 'DECLARATIVES') C._decl = true;
     // paragraphe : nom seul suivi d'un point (PROCEDURE)
-    if (div === 'PROCEDURE' && w.length === 1 && IDENT.test(v) && !/^(SECTION|DIVISION|END|EXIT|STOP|GO|PERFORM|MOVE|IF|ELSE|CALL|READ|WRITE|OPEN|CLOSE|DISPLAY|COMPUTE|ADD|SUBTRACT|MULTIPLY|DIVIDE|SET|INITIALIZE|ACCEPT|EVALUATE|END-EVALUATE|WHEN|END-IF|UNTIL|VARYING|CONTINUE|RETURN)$/.test(v)){
+    if (div === 'PROCEDURE' && w.length === 1 && IDENT.test(v) && !/^(SECTION|DIVISION|END|DECLARATIVES|EXIT|STOP|GO|PERFORM|MOVE|IF|ELSE|CALL|READ|WRITE|OPEN|CLOSE|DISPLAY|COMPUTE|ADD|SUBTRACT|MULTIPLY|DIVIDE|SET|INITIALIZE|ACCEPT|EVALUATE|END-EVALUATE|WHEN|END-IF|UNTIL|VARYING|CONTINUE|RETURN)$/.test(v)){
       C.paragraphs.push({ name: v, ln: s.ln });
       para = v;
       continue;
     }
-    if (div === 'PROCEDURE' || div === null) procSentence(C, t, s, para, opAdd);
+    if (div === 'PROCEDURE' || div === null){
+      // Code mort : dernier énoncé de chaque paragraphe + conditions qui
+      // désactivent l'analyse quand elle ne peut pas être certaine
+      // (DECLARATIVES/USE = gestionnaires implicites, ALTER = GO TO patché à l'exécution).
+      const UQF = t.toUpperCase().replace(/\.\s*$/, '').replace(/'[^']*'/g, "''").trim();
+      if (/^DECLARATIVES\b/.test(UQF)) C._decl = true;
+      if (/\bALTER\b/.test(UQF)) C._alter = true;
+      if (div === 'PROCEDURE'){
+        C.flowLast = C.flowLast || {};
+        C.flowLast[para || ''] = UQF;
+        // SORT ... INPUT/OUTPUT PROCEDURE IS x : cibles exécutées par SORT → vivantes
+        if (/\bSORT\b/.test(UQF)){
+          const spr = /(INPUT|OUTPUT)\s+PROCEDURE\s+(?:IS\s+)?([A-Z0-9\-]+)/g;
+          let m2;
+          while ((m2 = spr.exec(UQF))) C.performs.push({ from: para, to: m2[2], thru: null, ln: s.ln, kind: 'sort' });
+        }
+      }
+      procSentence(C, t, s, para, opAdd);
+    }
   }
   if (!C.programId) C.warns.push('PROGRAM-ID not found');
   // cibles PERFORM / GO TO introuvables : signalées, aucune arête inventée
@@ -1149,6 +1326,48 @@ function parseCOBOL(file, text, registry){
   C.gotos.forEach(g => {
     if (g.to && !knownParas.has(g.to)) C.warns.push(`line ${g.ln}: GO TO ${g.to} — target not found → no edge created`);
   });
+  // ── Code mort : paragraphes inatteignables ──
+  // Un paragraphe est VIVANT si (a) cible d'un PERFORM/GO TO/THRU depuis un
+  // paragraphe vivant, ou (b) atteignable par chute depuis un paragraphe vivant
+  // dont le dernier énoncé n'est PAS un transfert inconditionnel (GO TO seul,
+  // STOP RUN, GOBACK, EXIT PROGRAM/CICS en début d'énoncé). Tout doute
+  // (GO TO dans un IF, GO TO DEPENDING, chute) rend vivant : on ne déclare
+  // jamais "mort" sans certitude. Point fixe : les GO TO arrière (rebonds)
+  // peuvent rendre vivants des paragraphes déjà dépassés par la chute.
+  C.dead = [];
+  if (C._decl || C._alter){
+    C.warns.push((C._decl ? 'DECLARATIVES section present (USE handlers are implicit targets)'
+      : 'ALTER statement present (GO TO patched at runtime)')
+      + ' — paragraph dead-code analysis disabled for this program, nothing invented');
+  } else if (C.paragraphs.length){
+    const nameSet = new Set(C.paragraphs.map(p=>p.name));
+    const targetsOf = {};
+    const addT = (from, to) => { if (from && to && nameSet.has(to)) (targetsOf[from] = targetsOf[from] || []).push(to); };
+    C.performs.forEach(p => { addT(p.from, p.to); if (p.thru) addT(p.from, p.thru); });
+    C.gotos.forEach(g => addT(g.from, g.to));
+    C.cics.forEach(x => (x.handles || []).forEach(h => addT(x.para, h.to)));
+    const isTerm = u => !!u && /^(GO\s+TO|GOTO|STOP\s+RUN|GOBACK|EXIT\s+PROGRAM|EXIT\s+CICS)\b/.test(u);
+    const RE = new Set(['']);   // '' = bloc d'entrée implicite (énoncés avant le 1er paragraphe)
+    let changed = true, guard = 0;
+    while (changed && guard++ < C.paragraphs.length + 2){
+      changed = false;
+      let fall = !isTerm(C.flowLast ? C.flowLast[''] : null);
+      for (const p of C.paragraphs){
+        const r = fall || RE.has(p.name);
+        if (r && !RE.has(p.name)){ RE.add(p.name); changed = true; }
+        fall = r && !isTerm(C.flowLast ? C.flowLast[p.name] : null);
+      }
+      for (const src of RE){
+        (targetsOf[src] || []).forEach(t => { if (!RE.has(t)){ RE.add(t); changed = true; } });
+      }
+    }
+    C.paragraphs.forEach(p => {
+      if (!RE.has(p.name)){
+        C.dead.push({ name: p.name, ln: p.ln });
+        C.warns.push(`paragraph ${p.name} (line ${p.ln}) appears unreachable — no PERFORM/GO TO target and no fall-through path (dead code)`);
+      }
+    });
+  }
   resolveOps(C);
   resolveCalls(C);
   return C;
@@ -1166,6 +1385,15 @@ function parseCOBOL(file, text, registry){
 // exactement le même identifiant pour un job donné.
 
 const CONF_RANK = { certain: 3, probable: 2, unknown: 1 };
+// ── Sévérité des avertissements : 1 = bloque la compréhension (membre/programme manquant),
+// 2 = incertitude (valeur inconnue, code mort), 3 = informationnel (restart, condition) ──
+function warnSeverity(w){
+  const u = String(w).toUpperCase();
+  if (u.includes('CANNOT BE EXPANDED') || u.includes('NOT UPLOADED') || u.includes('NOT FOUND') || u.includes('NEVER EXECUTED OR CALLED')) return 1;
+  if (u.includes('UNKNOWN') || u.includes('UNCLEAR') || u.includes('UNREACHABLE') || u.includes('COULD NOT BE RESOLVED') || u.includes('VARIABLE VALUE')) return 2;
+  return 3;
+}
+
 function buildModel(files){
   linkCatalogedProcs();
   const nodes = new Map();
@@ -1232,10 +1460,15 @@ function buildModel(files){
     if (f.lang !== 'JCL') return;
     (f.parsed.jobs || []).forEach(jb => {
       const jname = jnameOf(jb, f);
-      addNode('job', jname, { file: f.name });
+      addNode('job', jname, { file: f.name, rd: (jb.params && typeof jb.params.RD === 'string') ? jb.params.RD.toUpperCase() : null, rerun: (jb.params && typeof jb.params.RERUN === 'string') ? jb.params.RERUN.toUpperCase() : null });
+      if (jb.params && (jb.params.RD || jb.params.RERUN))
+        m.warnings.push('job ' + jname + ': RD/RERUN restart parameter present (' + (jb.params.RD ? 'RD=' + jb.params.RD : 'RERUN=' + jb.params.RERUN) + ') — execution may be resumed or repeated; relations shown are structural, not run counts');
       (jb.steps || []).forEach(st => {
         const sid = 'step|' + jname + '.' + st.name;
-        addNode('step', jname + '.' + st.name, { job: jname, pgm: st.target, kind: st.kind });
+        addNode('step', jname + '.' + st.name, { job: jname, pgm: st.target, kind: st.kind,
+          condition: st.condition || null, cond: st.cond || null, rd: st.rd || null });
+        if (st.cond || st.condition) m.warnings.push('step ' + jname + '.' + st.name + ' is conditional (' + (st.cond ? 'COND=' + st.cond : 'IF ' + (st.condition.neg ? 'NOT ' : '') + st.condition.text) + ') — relations assume execution happens; the condition is not evaluated');
+        if (st.rd) m.warnings.push('step ' + jname + '.' + st.name + ': RD=' + st.rd + ' (automatic restart on ABEND) — the step may run twice; relations unchanged');
         addEdge('job|' + jname, sid, 'contains', 'certain', [{ file: f.name, ln: st.line, note: 'EXEC ' + (st.target || '?') }]);
         // EXEC PGM → prog (uploadé) ou xpgm (externe) ; PROC non résolue → avertissement, jamais d'arête inventée
         if (st.kind === 'PGM' && st.target){
@@ -1243,6 +1476,15 @@ function buildModel(files){
           const pid = (isCbl ? 'prog|' : 'xpgm|') + st.target;
           addNode(isCbl ? 'prog' : 'xpgm', st.target, { file: isCbl ? files.find(x => x.lang==='CBL' && x.parsed.cobol && x.parsed.cobol.programId===st.target).name : null });
           addEdge(sid, pid, 'exec', 'certain', [{ file: f.name, ln: st.line, note: 'EXEC PGM=' + st.target }]);
+          // IKJEFT01 + cartes SYSTSIN : EXEC 'member' → REXX uploadé (certain), sinon avertissement honnête
+          if ((st.target === 'IKJEFT01' || st.target === 'IKJEFT01B') && st.rexxExec){
+            const mem = st.rexxExec;
+            const rx = files.find(x => x.lang === 'REXX' && x.parsed.rexx && x.parsed.rexx.execName === mem);
+            const cb = files.find(x => x.lang === 'CBL' && x.parsed.cobol && x.parsed.cobol.programId === mem);
+            if (rx) addEdge(sid, 'prog|' + mem, 'exec', 'certain', [{ file: f.name, ln: st.line, note: "IKJEFT01 SYSTSIN EXEC '" + mem + "'" }]);
+            else if (cb) addEdge(sid, 'prog|' + mem, 'exec', 'certain', [{ file: f.name, ln: st.line, note: "IKJEFT01 SYSTSIN EXEC '" + mem + "' (COBOL)" }]);
+            else m.warnings.push("EXEC '" + mem + "' (REXX/CLIST) in " + jname + "." + st.name + " not uploaded — cannot be expanded");
+          }
         } else if (st.kind === 'PROC'){
           if (st.resolved === false) m.warnings.push('PROC ' + st.target + ' in ' + jname + '.' + st.name + ' not uploaded — cannot be expanded');
           else if (st.target) addEdge(sid, 'xpgm|' + st.target, 'exec', 'unknown', [{ file: f.name, ln: st.line, note: 'EXEC PROC=' + st.target }]);
@@ -1256,6 +1498,37 @@ function buildModel(files){
           if (op === 'unknown') m.warnings.push('dataset ' + d.name + ': usage unclear (no DISP, no matching program) — flagged, not guessed');
         });
       });
+    });
+  });
+
+  // ── REXX ──
+  files.forEach(f => {
+    if (f.lang !== 'REXX' || !f.parsed.rexx) return;
+    const R = f.parsed.rexx;
+    const rid = addNode('prog', R.execName, { file: f.name, rexx: true }).id;
+    R.calls.forEach(c => {
+      if (c.quoted){
+        const mem = (c.target.match(/\(([A-Z0-9\-@#$.]+)\)\s*$/)||[])[1] || null;
+        const dsn = c.target.replace(/\([A-Z0-9\-@#$.]+\)\s*$/, '');
+        const tgt = mem || (dsn.includes('.') ? null : dsn.toUpperCase());
+        if (tgt){
+          const rx2 = files.find(x => x.lang === 'REXX' && x !== f && x.parsed.rexx && x.parsed.rexx.execName === tgt);
+          const cb2 = files.find(x => x.lang === 'CBL' && x.parsed.cobol && x.parsed.cobol.programId === tgt);
+          const isUp = !!(rx2 || cb2);
+          addNode(isUp ? 'prog' : 'xpgm', tgt, { file: rx2 ? rx2.name : (cb2 ? cb2.name : null) });
+          addEdge(rid, (isUp ? 'prog|' : 'xpgm|') + tgt, 'call', 'certain', [{ file: f.name, ln: c.ln, note: "REXX CALL '" + c.target + "'" }]);
+        } else {
+          // CALL 'dsn.sans.membre' → dataset cité, cible exacte inconnue : arête references, pas d'invention
+          const did = addNode('ds', dsn, { referenced: true }).id;
+          addEdge(rid, did, 'references', 'unknown', [{ file: f.name, ln: c.ln, note: "REXX CALL '" + c.target + "' — member unknown" }]);
+        }
+      } else if (c.viaVar){
+        m.warnings.push('REXX ' + R.execName + ': CALL via variable ' + c.viaVar + ' (line ' + c.ln + ') — target unknown, no edge invented');
+      }
+    });
+    R.dsns.forEach(d => {
+      const did = addNode('ds', d.name, { referenced: true }).id;
+      addEdge(rid, did, 'references', 'unknown', [{ file: f.name, ln: d.ln, note: "REXX dataset reference '" + d.name + "' — access type (read/write) unknown" }]);
     });
   });
 
@@ -1302,7 +1575,7 @@ function buildModel(files){
                     { file: f.name, ln: sl.ln, note: 'COBOL: SELECT ' + sl.file + ' ASSIGN TO ' + sl.dd },
                     { file: f.name, ln: op.ln, note: op.cics ? 'COBOL: EXEC CICS ' + op.cics + ' FILE(' + (op.cicsFile || sl.file) + ')' : 'COBOL: ' + op.op.toUpperCase() + ' ' + sl.file }
                   ];
-                  addEdge('step|' + jnameOf(jb, jf) + '.' + st.name, dsNode.id, op.op, 'certain', ev);
+                  addEdge('step|' + jnameOf(jb, jf) + '.' + st.name, dsNode.id, op.op, op.viaVar ? 'probable' : 'certain', ev);
                 });
               });
             });
@@ -1337,18 +1610,19 @@ function buildModel(files){
         }
         if (e.op && e.file && !(C.cicsToFile && C.cicsToFile[e.file])){
           const fnode = addNode('fct', e.file, {});
-          addEdge(pid, fnode.id, e.op, 'certain', [{ file: f.name, ln: e.ln, note: 'EXEC CICS ' + e.cmd + ' FILE(' + e.file + ') — FCT entry, dataset unknown' }]);
+          addEdge(pid, fnode.id, e.op, e.fileViaVar ? 'probable' : 'certain', [{ file: f.name, ln: e.ln, note: 'EXEC CICS ' + e.cmd + ' FILE(' + e.file + ')' + (e.fileViaVar ? ' (via variable, value traced)' : '') + ' — FCT entry, dataset unknown' }]);
         }
       });
       // flux interne pour le panneau flow
-      const inn = { paragraphs: C.paragraphs, edges: [] };
+      const inn = { paragraphs: C.paragraphs, dead: C.dead || [], edges: [] };
       C.performs.forEach(p => inn.edges.push({ from: p.from, to: p.to, k: 'perform', ln: p.ln }));
       C.gotos.forEach(g => inn.edges.push({ from: g.from, to: g.to, k: 'goto', ln: g.ln }));
+      C.cics.forEach(x => (x.handles || []).forEach(h => inn.edges.push({ from: x.para, to: h.to, k: 'handle', ln: x.ln })));
       m.internal[C.programId] = inn;
       // paragraphes/sections = nœuds du graphe (impact navigable : job → step → prog → para)
       const paraIds = new Set(C.paragraphs.map(p=>p.name));
       C.paragraphs.forEach(p => {
-        const pnode = addNode('para', C.programId + '.' + p.name, { program: C.programId, ln: p.ln, section: !!p.section });
+        const pnode = addNode('para', C.programId + '.' + p.name, { program: C.programId, ln: p.ln, section: !!p.section, dead: (C.dead || []).some(d => d.name === p.name) });
         addEdge(pid, pnode.id, 'contains', 'certain', [{ file: f.name, ln: p.ln, note: p.section ? 'section header' : 'paragraph' }]);
       });
       const pEdge = (from, to, k, conf, note, ln2) => {
@@ -1362,6 +1636,13 @@ function buildModel(files){
       C.gotos.forEach(g => {
         pEdge(g.from, g.to, 'goto', g.depending ? 'probable' : 'certain', g.depending ? 'GO TO (DEPENDING ON — branch)' : 'GO TO', g.ln);
       });
+      // EXEC CICS HANDLE CONDITION/AID err(PARA) : transfert de contrôle explicite → arête certaine
+      C.cics.forEach(x => (x.handles || []).forEach(h => pEdge(x.para, h.to, 'handle', 'certain', 'EXEC CICS ' + x.cmd + ' ' + h.key + '(' + h.to + ')', x.ln)));
+      if ((C.dead || []).length){
+        m.warnings.push('dead code: ' + C.dead.length + ' unreachable paragraph(s) in ' + C.programId + ' (' +
+          C.dead.slice(0, 6).map(d => d.name).join(', ') + (C.dead.length > 6 ? ', …' : '') +
+          ') — never targeted by PERFORM/GO TO, no fall-through path');
+      }
     }
     if (f.lang === 'CPY'){
       addNode('cpy', base(f.name), { file: f.name });
@@ -1393,6 +1674,16 @@ function buildModel(files){
     });
   });
 
+  // programmes chargés jamais exécutés ni appelés dans le set analysé —
+  // honnête : peut être appelé par du code NON uploadé (CICS START, scheduler…)
+  [...nodes.values()].forEach(n => {
+    if (n.type !== 'prog') return;
+    const called = (rev[n.id] || []).some(e => e.k === 'exec' || e.k === 'call');
+    if (!called) m.warnings.push('program ' + n.name + ' is never executed or called in the analyzed set — possibly dead, or called by code not uploaded (scheduler, CICS START, other jobs)');
+  });
+
+  // phase 4 : tri stable par sévérité — les avertissements bloquants apparaissent en premier
+  m.warnings.sort((a, b) => warnSeverity(a) - warnSeverity(b));
   return m;
 }
 
@@ -1657,7 +1948,7 @@ function runV2Tests(){
     ];
     gfiles.forEach(f => {
       if (f.lang === 'JCL'){ const res = parseJCL(f.text); f.parsed = { jobs: res.jobs, procs: res.procs, warnings: res.warnings }; }
-      else { const C = parseCOBOL(f.name, f.text, {}); f.parsed = { cobol: C, warnings: C.warns, programId: C.programId, copies: C.copyUsed.map(c=>({name:c.name,resolved:!!c.resolved})), sqlCount: C.sql.length, performs: C.performs.length, gotos: C.gotos.length }; }
+      else { const C = parseCOBOL(f.name, f.text, {}); f.parsed = { cobol: C, warnings: C.warns, programId: C.programId, copies: C.copyUsed.map(c=>({name:c.name,resolved:!!c.resolved})), sqlCount: C.sql.length, performs: C.performs.length, gotos: C.gotos.length, deadCount: (C.dead||[]).length }; }
     });
     const M = buildModel(gfiles);
     const E = M.edges;
@@ -1700,8 +1991,8 @@ function runV2Tests(){
     const C9 = parseCOBOL('TCS100.CBL', CICSTXT, {});
     T('V2 CICS: 8 commandes EXEC CICS capturées (dont bloc multi-ligne)', C9.cics.length === 8);
     T('V2 CICS: READ FILE → entrée FCT, WRITE FILE(BATCHDD) rattaché au SELECT ASSIGN', (C9.cicsFiles['CUSTFCT']||[]).some(o=>o.op==='read') && (C9.fileOps['BATCH-FILE']||[]).some(o=>o.op==='write' && o.cics==='WRITE'));
-    T('V2 CICS: FILE(variable) dynamique → aucune entrée, rien inventé', C9.cics.some(e=>e.cmd==='READ'&&e.file===null&&e.silent) && !C9.cicsFiles['WS-FILE-VAR'] && !C9.warns.some(w=>w.includes('WS-FILE-VAR')));
-    T('V2 CICS: HANDLE CONDITION silencieux (aucun warning, aucune arête)', C9.cics.some(e=>e.cmd==='HANDLE'&&e.silent) && !C9.warns.some(w=>w.includes('HANDLE')));
+    T('V2 CICS: FILE(variable) sans constante tracée → warning explicite, aucune entrée, rien inventé', C9.cics.some(e=>e.cmd==='READ'&&e.file===null&&e.silent) && !C9.cicsFiles['WS-FILE-VAR'] && C9.warns.some(w=>w.includes('WS-FILE-VAR') && w.includes('variable value unknown')));
+    T('V2 CICS: HANDLE CONDITION cible capturée (transfert de contrôle), sans warning', C9.cics.some(e=>e.cmd==='HANDLE'&&e.handles&&e.handles.length===1&&e.handles[0].to==='ERRORPAR'&&e.handles[0].key==='CONDITION'&&!e.silent) && !C9.warns.some(w=>w.includes('HANDLE')));
     const bakC = { files: state.files, loaded: state.loaded, log: state.log };
     state.files = [{ name:'TCS100.CBL', lang:'CBL', text:CICSTXT }];
     state.files.forEach(x => parseFile(x));
@@ -1713,6 +2004,28 @@ function runV2Tests(){
     T('V2 CICS GRAPH: XCTL/LINK → call vers programmes externes certain', (gC('prog|TCS100','xpgm|TCS200','call')||{}).c==='certain' && (gC('prog|TCS100','xpgm|HELLOPGM','call')||{}).c==='certain');
     T('V2 CICS GRAPH: SEND MAP → nœud map + uses certain', (gC('prog|TCS100','map|MENMAP1','uses')||{}).c==='certain' && !!MC.nodes.get('map|MENMAP1'));
     T('V2 CICS GRAPH: WRITEQ TS QUEUE → nœud q + write certain + qtype TS', (gC('prog|TCS100','q|TSTQ','write')||{}).c==='certain' && (MC.nodes.get('q|TSTQ').data||{}).qtype==='TS');
+    // ── 6b. CICS approfondi : FILE(variable) tracé + HANDLE CONDITION/AID/ABEND ──
+    const CVT = "IDENTIFICATION DIVISION.\nPROGRAM-ID. CICSVAR.\nENVIRONMENT DIVISION.\nINPUT-OUTPUT SECTION.\nFILE-CONTROL.\n    SELECT CUST-FILE ASSIGN TO CUSTFCT.\nDATA DIVISION.\nFILE SECTION.\nFD  CUST-FILE.\n01  CUST-REC.\nWORKING-STORAGE SECTION.\n01  WS-FILE PIC X(8).\nPROCEDURE DIVISION.\nSETUP-P.\n    MOVE 'CUSTFCT' TO WS-FILE.\nREAD-P.\n    EXEC CICS READ FILE(WS-FILE) INTO(R1) END-EXEC.\n    EXEC CICS HANDLE CONDITION NOTFND(NOTFND-P) ERROR(ERR-P) END-EXEC.\n    EXEC CICS HANDLE AID ENTER(ENT-P) END-EXEC.\n    EXEC CICS HANDLE ABEND PROGRAM('ABPROG') END-EXEC.\n    STOP RUN.\nORPH-P.\n    DISPLAY 'ORPH'.\nNOTFND-P.\n    DISPLAY 'NF'.\nERR-P.\n    DISPLAY 'E'.\nENT-P.\n    DISPLAY 'ENT'.\nUNK-P.\n    EXEC CICS WRITE FILE(WS-UNK) INTO(R2) END-EXEC.\n    DISPLAY 'U'.";
+    const CVJ = "//CVJOB JOB 1\n//S1 EXEC PGM=CICSVAR\n//CUSTFCT DD DSN=BK.CUSTFCT.DATA,DISP=SHR";
+    state.files = [ { name:'CVJOB.JCL', lang:'JCL', text:CVJ }, { name:'CICSVAR.CBL', lang:'CBL', text:CVT } ];
+    state.files.forEach(f => parseFile(f));
+    state.loaded = true; state.log = []; state._model = null;
+    buildLog();
+    const MV = getModel();
+    const gV = (f2, t2, k2) => MV.edges.find(e => e.f === f2 && e.t === t2 && e.k === k2);
+    T('V2 CICS VAR: FILE(variable) tracé → step→dataset probable (dynamique, pas certain)', (gV('step|CVJOB.S1','ds|BK.CUSTFCT.DATA','read')||{}).c === 'probable');
+    T('V2 CICS VAR: preuve = chaîne EXEC CICS + MOVE constant + SELECT + DD JCL', (() => { const e2 = gV('step|CVJOB.S1','ds|BK.CUSTFCT.DATA','read'); return !!e2 && e2.ev.length >= 3 && e2.ev.some(x => x.note && x.note.includes('CICS')); })());
+    T('V2 CICS VAR: FILE(variable) sans constante → warning, aucune arête, rien inventé', (() => {
+      const C6 = state.files[1].parsed.cobol;
+      return C6.warns.some(w => w.includes('FILE(WS-UNK)') && w.includes('variable value unknown')) && !MV.nodes.has('fct|WS-UNK') && !MV.edges.some(e => String(e.t).includes('WS-UNK'));
+    })());
+    T('V2 CICS HANDLE: CONDITION/AID → arêtes para→para handle certain', (gV('para|CICSVAR.READ-P','para|CICSVAR.NOTFND-P','handle')||{}).c === 'certain' && (gV('para|CICSVAR.READ-P','para|CICSVAR.ENT-P','handle')||{}).c === 'certain');
+    T('V2 CICS HANDLE: ABEND PROGRAM(x) → appel programme certain', (gV('prog|CICSVAR','xpgm|ABPROG','call')||{}).c === 'certain');
+    T('V2 CICS HANDLE: cibles HANDLE vivantes — pas de faux code mort', (() => {
+      const C6 = state.files[1].parsed.cobol;
+      const dn = (C6.dead||[]).map(d=>d.name);
+      return dn.length === 1 && dn.includes('ORPH-P') && !dn.includes('NOTFND-P') && !dn.includes('ERR-P') && !dn.includes('ENT-P');
+    })());
     state.files = bakC.files; state.loaded = bakC.loaded; state.log = bakC.log; state._model = null;
 
     // ── 7. Export des résultats & lecture express non-expert ──
@@ -1771,6 +2084,234 @@ function runV2Tests(){
     while ((am = are.exec(allHTML))) if (/[<>]/.test(am[1])) badAttr = true;
     T('V2 XSS: attributs onclick/onchange sans < ni > bruts', !badAttr);
     state.files = []; state.loaded = false; state.log = []; state._model = null;
+
+    // ── 9. Code mort : paragraphes inatteignables + programmes jamais référencés ──
+    const DCD = ["IDENTIFICATION DIVISION.","PROGRAM-ID. DEADPGM.","PROCEDURE DIVISION.",
+      "MAIN-P.","    PERFORM INIT-P.","    PERFORM THRU-P.","    STOP RUN.",
+      "DEAD-P.","    DISPLAY 'NEVER'.",
+      "INIT-P.","    MOVE 1 TO X.",
+      "THRU-P.","    DISPLAY 'THRU'.",
+      "USED-P.","    GO TO FIN-P.",
+      "AFTER-GO-P.","    DISPLAY 'NEVER2'.",
+      "FIN-P.","    IF X = 1 GO TO FIN-P.","    DISPLAY 'FALLS'.",
+      "NEXT-P.","    DISPLAY 'REACHED BY FALL'."].join("\n");
+    const CDD = parseCOBOL('DEADPGM.CBL', DCD, {});
+    const deadNames = (CDD.dead||[]).map(d=>d.name);
+    T('V2 DEAD: morts = exactement les non ciblés après STOP RUN / GO TO', deadNames.length === 2 && deadNames.includes('DEAD-P') && deadNames.includes('AFTER-GO-P'));
+    T('V2 DEAD: PERFORM, PERFORM THRU, cible GO TO et chute restent vivants', ['MAIN-P','INIT-P','THRU-P','USED-P','FIN-P','NEXT-P'].every(n => !deadNames.includes(n)));
+    T('V2 DEAD: GO TO conditionnel (IF ... GO TO) ne bloque pas la chute', !deadNames.includes('NEXT-P') && !deadNames.includes('FIN-P'));
+    T('V2 DEAD: warning précis par paragraphe mort (nom + ligne)', CDD.warns.some(w => w.includes('DEAD-P') && w.includes('unreachable') && w.includes('(line')));
+    T('V2 DEAD: DECLARATIVES → analyse désactivée honnêtement, rien inventé', (() => {
+      const CD3 = parseCOBOL('D3.CBL', "IDENTIFICATION DIVISION.\nPROGRAM-ID. D3.\nPROCEDURE DIVISION.\nDECLARATIVES.\nUSE-P.\n    DISPLAY 'X'.\nEND DECLARATIVES.\nMAIN-P.\n    STOP RUN.\nD-P.\n    DISPLAY 'NEVER'.", {});
+      return (CD3.dead||[]).length === 0 && CD3.warns.some(w => w.includes('DECLARATIVES') && w.includes('disabled'));
+    })());
+    T('V2 DEAD: SORT INPUT/OUTPUT PROCEDURE → cibles vivantes', (() => {
+      const CD4 = parseCOBOL('D4.CBL', "IDENTIFICATION DIVISION.\nPROGRAM-ID. D4.\nPROCEDURE DIVISION.\nMAIN-P.\n    SORT S-FILE INPUT PROCEDURE IS IN-P\n    OUTPUT PROCEDURE OUT-P.\n    STOP RUN.\nD-P.\n    DISPLAY 'NEVER'.\nIN-P.\n    DISPLAY 'IN'.\nOUT-P.\n    DISPLAY 'OUT'.", {});
+      const dn = (CD4.dead||[]).map(d=>d.name);
+      return !dn.includes('IN-P') && !dn.includes('OUT-P') && dn.includes('D-P') && CD4.performs.some(p=>p.to==='IN-P' && p.kind==='sort');
+    })());
+    T('V2 DEAD: modèle — nœud para marqué dead + warning agrégé + programme orphelin signalé', (() => {
+      state.files = [{ name:'DJ.JCL', lang:'JCL', text:"//DJ JOB 1\n//S1 EXEC PGM=DEADPGM\n//DD1 DD DSN=D.DATA,DISP=SHR" },
+                     { name:'DEADPGM.CBL', lang:'CBL', text:DCD },
+                     { name:'ORPHAN.CBL', lang:'CBL', text:"IDENTIFICATION DIVISION.\nPROGRAM-ID. ORPHAN.\nPROCEDURE DIVISION.\nP1.\n    STOP RUN." }];
+      state.files.forEach(f => parseFile(f));
+      state.loaded = true; state.log = []; state._model = null;
+      buildLog();
+      const MDL = getModel();
+      const node = MDL.nodes.get('para|DEADPGM.DEAD-P');
+      return !!node && node.data.dead === true
+        && MDL.warnings.some(w => w.includes('unreachable paragraph(s) in DEADPGM') && w.includes('DEAD-P'))
+        && MDL.warnings.some(w => w.includes('program ORPHAN is never executed or called'))
+        && !MDL.warnings.some(w => w.includes('program DEADPGM is never'));
+    })());
+
+    // ── 10. REXX & cartes SORT (phase 3) ──
+    const SJ = "//SJ JOB 1\n//S1 EXEC PGM=SORT\n//SORTIN DD DSN=IN.DATA,DISP=SHR\n//SORTOUT DD DSN=OUT.DATA,DISP=OLD\n//SYSIN DD *\nSORT FIELDS=(1,10,CH,A)\nSUM FIELDS=NONE\n/*\n//S2 EXEC PGM=ICEMAN\n//SORTIN DD DSN=IN2.DATA,DISP=SHR\n//SORTOUT DD DSN=OUT2.DATA,DISP=OLD\n//SYSIN DD *\nSORT FORMAT=CH,FIELDS=(5,3,B)\n/*\n//S3 EXEC PGM=SORT\n//SORTIN DD DSN=IN3.DATA,DISP=SHR\n//SORTOUT DD DSN=OUT3.DATA,DISP=OLD\n//SYSIN DD DSN=LIB.CARDS(SRT3),DISP=SHR\n//S4 EXEC PGM=SORT\n//SORTIN DD DSN=IN4.DATA,DISP=SHR\n//SORTOUT DD DSN=OUT4.DATA,DISP=OLD\n//SYSOUT DD SYSOUT=*\n//S5 EXEC PGM=IKJEFT01\n//SYSTSIN DD *\nEXEC 'PAY.REXX(PAYLIST)'\n/*\n//S6 EXEC PGM=IKJEFT01\n//SYSEXEC DD DSN=PAY.REXX,DISP=SHR\n//SYSTSIN DD DSN=PAY.SYSTSIN,DISP=SHR";
+    const resS = parseJCL(SJ, {});
+    const stS = n => resS.jobs[0].steps.find(s => s.name === n);
+    T('V2 SORT: cartes SYSIN inline capturées, FIELDS=(1,10,CH,A) décodées + SUM', (() => {
+      const si = (stS('S1')||{}).sortInfo;
+      return !!si && si.type==='sort' && si.decoded && si.fields.length===1
+        && si.fields[0].pos===1 && si.fields[0].len===10 && si.fields[0].type==='CH' && si.fields[0].order==='A'
+        && si.sum==='none';
+    })());
+    T('V2 SORT: ICEMAN (alias DFSORT) + forme courte FORMAT=CH (p,l,ordre)', (() => {
+      const si = (stS('S2')||{}).sortInfo;
+      return !!si && si.fields.length===1 && si.fields[0].pos===5 && si.fields[0].len===3
+        && si.fields[0].type==='CH' && si.fields[0].order==='B';
+    })());
+    T('V2 SORT: SYSIN en dataset non uploadé → warning honnête, aucun champ inventé', (() => {
+      const s3 = stS('S3');
+      return !s3.sortInfo && resS.warnings.some(w => w.includes('S3') && w.includes('sort fields unknown'));
+    })());
+    T('V2 SORT: step SORT sans SYSIN → warning, rien décodé', (() => {
+      const s4 = stS('S4');
+      return !s4.sortInfo && resS.warnings.some(w => w.includes('S4') && w.includes('no SYSIN cards captured'));
+    })());
+    T('V2 SORT: cartes in-stream capturées sans faux warning "non-JCL line ignored"', !resS.warnings.some(w => w.includes('non-JCL')));
+    T('V2 SORT UI: stepDesc affiche les champs décodés et SUM', (() => {
+      const d = stepDesc({ name:'S1', pgm:'SORT', kind:'PGM', dds:[], sortInfo: stS('S1').sortInfo });
+      return d.includes('1:10 CH A') && d.includes('SUM');
+    })());
+    T('V2 REXX: EXEC \'dsn(member)\' de SYSTSIN → membre extrait', (stS('S5')||{}).rexxExec === 'PAYLIST');
+    T('V2 REXX: SYSTSIN en dataset non uploadé → membre inconnu + warning honnête', (() => {
+      const s6 = stS('S6');
+      return !s6.rexxExec && resS.warnings.some(w => w.includes('S6') && w.includes('executed member unknown'));
+    })());
+    T('V2 REXX: détection .REX/.EXEC et marqueur /* REXX */', detectLang('PAYLIST.REX', "SAY 'HI'") === 'REXX' && detectLang('PAYLIST.EXEC', "SAY 'HI'") === 'REXX' && detectLang('PAYLIST.TXT', "/* REXX PAYLIST */\nSAY 'HI'") === 'REXX' && detectLang('X.JCL', "//X JOB 1") === 'JCL');
+    const RXT = "/* REXX PAYLIST */\n/* cleanup batch */\nCALL 'PAY.CLEAN(PAYCLEAN)'\nADDRESS TSO \"DELETE 'PAY.WORK.FILE'\"\nCALL ON ERROR NAME ERRH\nCALL PAYTARGET\nSAY 'PAY.MASTER.DATA'\nERRH:\n  SAY 'E'";
+    const RX = parseREXX('PAYLIST.REX', RXT);
+    T('V2 REXX: CALL littéral capturé, CALL ON ERROR ignoré, libellé interne pas un appel', (() => {
+      return RX.execName === 'PAYLIST'
+        && RX.calls.length === 2
+        && RX.calls.some(c => c.quoted && c.target === 'PAY.CLEAN(PAYCLEAN)')
+        && RX.calls.some(c => !c.quoted && c.viaVar === 'PAYTARGET')
+        && !RX.calls.some(c => c.target === 'ON' || c.target === 'ERRH');
+    })());
+    T('V2 REXX: datasets cités entre guillemets capturés et dédoublonnés', (() => {
+      const names = RX.dsns.map(d => d.name);
+      return names.includes('PAY.MASTER.DATA') && names.includes('PAY.WORK.FILE')
+        && names.filter(n => n === 'PAY.MASTER.DATA').length === 1;
+    })());
+    const bakR = { files: state.files, loaded: state.loaded, log: state.log };
+    state.files = [
+      { name:'RXJOB.JCL', lang:'JCL', text:"//RXJOB JOB 1\n//S1 EXEC PGM=IKJEFT01\n//SYSTSIN DD *\nEXEC 'PAY.REXX(PAYLIST)'\n/*" },
+      { name:'PAYLIST.REX', lang:'REXX', text:RXT },
+      { name:'PAYCLEAN.REX', lang:'REXX', text:"/* REXX PAYCLEAN */\nSAY 'CLEAN'" }
+    ];
+    state.files.forEach(f => parseFile(f));
+    state.loaded = true; state.log = []; state._model = null;
+    buildLog();
+    const MR = getModel();
+    const gR = (f2, t2, k2) => MR.edges.find(e => e.f === f2 && e.t === t2 && e.k === k2);
+    T('V2 REXX GRAPH: IKJEFT01 SYSTSIN EXEC → prog|PAYLIST exec certain', (gR('step|RXJOB.S1','prog|PAYLIST','exec')||{}).c === 'certain');
+    T('V2 REXX GRAPH: CALL \'dsn(member)\' vers exec uploadé → prog|PAYCLEAN call certain', (gR('prog|PAYLIST','prog|PAYCLEAN','call')||{}).c === 'certain');
+    T('V2 REXX GRAPH: CALL via variable → warning, aucune arête inventée', (() => {
+      return MR.warnings.some(w => w.includes('CALL via variable PAYTARGET'))
+        && !MR.edges.some(e => String(e.t).includes('PAYTARGET'));
+    })());
+    T('V2 REXX GRAPH: datasets cités → references unknown, jamais read/write inventé', (() => {
+      const e1 = gR('prog|PAYLIST','ds|PAY.MASTER.DATA','references');
+      return !!e1 && e1.c === 'unknown'
+        && !MR.edges.some(e => e.f === 'prog|PAYLIST' && e.t === 'ds|PAY.MASTER.DATA' && (e.k === 'read' || e.k === 'write'));
+    })());
+    T('V2 REXX GRAPH: CALL ON ERROR ne crée pas de faux programme externe', !MR.nodes.has('xpgm|ERROR') && !MR.nodes.has('xpgm|ON'));
+    T('V2 REXX GRAPH: IKJEFT01 EXEC membre non uploadé → warning, aucun nœud inventé', (() => {
+      state.files = [ { name:'RXJOB2.JCL', lang:'JCL', text:"//RXJOB2 JOB 1\n//S1 EXEC PGM=IKJEFT01\n//SYSTSIN DD *\nEXEC 'PAY.REXX(GHOSTEX)'\n/*" } ];
+      state.files.forEach(f => parseFile(f));
+      state._model = null;
+      const M2 = getModel();
+      return M2.warnings.some(w => w.includes("EXEC 'GHOSTEX'") && w.includes('cannot be expanded'))
+        && !M2.nodes.has('prog|GHOSTEX') && !M2.nodes.has('xpgm|GHOSTEX');
+    })());
+    state.files = bakR.files; state.loaded = bakR.loaded; state.log = bakR.log; state._model = null;
+
+    // ── 11. JCL finesse : COND=/IF/ELSE, RD/RERUN, tri des warnings par sévérité ──
+    const JF = "//JF JOB 1,RD=R\n//S1 EXEC PGM=PGM1,COND=(0,LT)\n//S2 EXEC PGM=PGM2,RD=R\n//IF1 IF (RC = 0) THEN\n//S3 EXEC PGM=PGM3\n//ELSE\n//S4 EXEC PGM=PGM4\n//ENDIF\n//S5 EXEC PGM=PGM5";
+    const resF = parseJCL(JF, {});
+    const stF = n => resF.jobs[0].steps.find(s => s.name === n);
+    T('V2 JCL4: EXEC COND= capturé, pas perdu dans les symboles', (() => {
+      const s1 = stF('S1');
+      return s1.cond === '(0,LT)' && !('COND' in s1.symbols) && !('RD' in stF('S2').symbols);
+    })());
+    T('V2 JCL4: EXEC RD= capturé (restart), COND/RD ne polluent pas les overrides', (() => {
+      const s2 = stF('S2');
+      return s2.rd === 'R' && Object.keys(s2.overrides).length === 0;
+    })());
+    T('V2 JCL4: IF THEN → condition, ELSE → négation, ENDIF → retour à zéro', (() => {
+      const s3 = stF('S3'), s4 = stF('S4'), s5 = stF('S5');
+      return !!s3.condition && s3.condition.neg === false && String(s3.condition.text).indexOf('(RC = 0)') === 0
+        && !!s4.condition && s4.condition.neg === true
+        && s5.condition === null;
+    })());
+    const bakF = { files: state.files, loaded: state.loaded, log: state.log };
+    state.files = [
+      { name:'JF.JCL', lang:'JCL', text:JF },
+      { name:'ORPHF.CBL', lang:'CBL', text:"IDENTIFICATION DIVISION.\nPROGRAM-ID. ORPHF.\nPROCEDURE DIVISION.\nP1.\n    STOP RUN." }
+    ];
+    state.files.forEach(f => parseFile(f));
+    state.loaded = true; state.log = []; state._model = null;
+    buildLog();
+    const MF = getModel();
+    T('V2 JCL4: modèle — data.cond/rd sur le step, data.rd sur le job + warning restart', (() => {
+      const ns = MF.nodes.get('step|JF.S1'), nj = MF.nodes.get('job|JF');
+      return !!ns && ns.data.cond === '(0,LT)' && MF.nodes.get('step|JF.S2').data.rd === 'R'
+        && !!nj && nj.data.rd === 'R'
+        && MF.warnings.some(w => w.indexOf('job JF: RD/RERUN restart parameter present') === 0)
+        && MF.warnings.some(w => w.includes('step JF.S2: RD=R (automatic restart'));
+    })());
+    T('V2 JCL4: étapes conditionnelles signalées sans condition évaluée (honnête)', (() => {
+      return MF.warnings.some(w => w.includes('step JF.S1 is conditional (COND=(0,LT)'))
+        && MF.warnings.some(w => w.includes('step JF.S3 is conditional (IF (RC = 0)'))
+        && MF.warnings.some(w => w.includes('step JF.S4 is conditional (IF NOT (RC = 0)'))
+        && MF.warnings.every(w => !w.includes('the condition is evaluated'));
+    })());
+    T('V2 JCL4: warnings triés par sévérité — bloquant avant informationnel', (() => {
+      const i1 = MF.warnings.findIndex(w => w.includes('program ORPHF is never executed or called'));
+      const i3 = MF.warnings.findIndex(w => w.includes('step JF.S1 is conditional'));
+      return i1 >= 0 && i3 >= 0 && i1 < i3;
+    })());
+    T('V2 JCL4: stepDesc affiche COND et RD avec mention explicite "not evaluated"', (() => {
+      const d = stepDesc({ name:'S1', pgm:'PGM1', kind:'PGM', dds:[], cond:'(0,LT)' });
+      const d2 = stepDesc({ name:'S2', pgm:'PGM2', kind:'PGM', dds:[], rd:'R' });
+      return d.includes('COND') && d.includes('not evaluated') && d2.includes('RD=R') && d2.includes('restart');
+    })());
+    state.files = bakF.files; state.loaded = bakF.loaded; state.log = bakF.log; state._model = null;
+
+    // ── 12. Robustesse : EBCDIC/encodages, COBOL 2002, rapport de contrôle ──
+    const enc37 = s => { const out = []; for (const ch of s){ const i = CP037.indexOf(ch); out.push(i >= 0 ? i : 0x40); } return new Uint8Array(out); };
+    T('V2 EBCDIC: CP037 aller-retour (lettres, chiffres, ponctuation, ligne JCL)', (() => {
+      const s = "//SORT01 EXEC PGM=SORT,PARM='FIELDS=COPY'";
+      const r = ebcdicDecode(enc37(s));
+      return r.text === s && r.unmapped === 0;
+    })());
+    T('V2 EBCDIC: détection honnête — EBCDIC oui, ASCII et UTF-8 accentué non', (() => {
+      const ascii = new Uint8Array('IDENTIFICATION DIVISION. HELLO WORLD'.split('').map(c => c.charCodeAt(0)));
+      const utf8fr = new Uint8Array([0xC3,0x89,0x43,0x4F,0x4C,0x45,0x20,0x2F,0x2F,0x4A,0x4F,0x42,0x20,0x31]);
+      return looksEbcdic(enc37('MONTHLY PAYROLL RUN FOR THE BANK MONTHLY PAYROLL RUN FOR THE BANK ')) === true
+        && looksEbcdic(ascii) === false && looksEbcdic(utf8fr) === false;
+    })());
+    T('V2 DECODE: BOM UTF-8 retiré, UTF-16LE décodé, accent UTF-8 intact', (() => {
+      const bom = decodeBytes(new Uint8Array([0xEF,0xBB,0xBF,0xC3,0x89,0x43,0x4F,0x4C,0x45]));
+      const u16 = decodeBytes(new Uint8Array([0xFF,0xFE,0x48,0x00,0x49,0x00]));
+      return bom.text === 'ÉCOLE' && bom.enc.indexOf('BOM') >= 0 && u16.text === 'HI' && u16.enc.indexOf('utf-16le') >= 0;
+    })());
+    T('V2 EBCDIC: octet hors table → ? compté, jamais deviné', (() => {
+      const r = ebcdicDecode(new Uint8Array([0xC8, 0x41, 0x40]));
+      return r.text === 'H? ' && r.unmapped === 1;
+    })());
+    T('V2 COBOL 2002: ID DIVISION accepté, PROGRAM-ID entre quotes + clause INITIAL, minuscules', (() => {
+      const C = parseCOBOL('N.CBL', "ID DIVISION.\nPROGRAM-ID. 'NEWPGM' IS INITIAL.\nPROCEDURE DIVISION.\nP1.\n    STOP RUN.", {});
+      const C2 = parseCOBOL('M.CBL', "IDENTIFICATION DIVISION.\nPROGRAM-ID. mixedcase.\nPROCEDURE DIVISION.\nP1.\n    STOP RUN.", {});
+      return C.programId === 'NEWPGM' && C.divisions.some(d => d.name === 'IDENTIFICATION') && C2.programId === 'MIXEDCASE';
+    })());
+    const bakG = { files: state.files, loaded: state.loaded, log: state.log };
+    state.files = [
+      { name: 'RJOB.JCL', lang: 'JCL', text: "//RJOB JOB 1,RD=R\n//S1 EXEC PGM=RPG1,COND=(0,LT)\n//WK DD DSN=NO.DISP.DS" },
+      { name: 'RPG1.CBL', lang: 'CBL', text: "IDENTIFICATION DIVISION.\nPROGRAM-ID. RPG1.\nPROCEDURE DIVISION.\nP1.\n    STOP RUN." },
+      { name: 'ORPHR.CBL', lang: 'CBL', text: "IDENTIFICATION DIVISION.\nPROGRAM-ID. ORPHR.\nPROCEDURE DIVISION.\nP1.\n    STOP RUN." },
+      { name: "X\"><script>.CBL", lang: 'CBL', text: "IDENTIFICATION DIVISION.\nPROGRAM-ID. HOSTILE.\nPROCEDURE DIVISION.\nP1.\n    STOP RUN." }
+    ];
+    state.files.forEach(f => parseFile(f));
+    state.loaded = true; state.log = []; state._model = null;
+    buildLog();
+    const HG = controlReportHTML();
+    T('V2 REPORT: HTML autonome — inventaire, 3 sévérités, confiance, orphelin visible', (() => {
+      return HG.indexOf('<!DOCTYPE html>') === 0 && HG.indexOf('1. Inventory') > 0
+        && HG.indexOf('Severity 1 — blocking') > 0 && HG.indexOf('Severity 2') > 0 && HG.indexOf('Severity 3') > 0
+        && HG.indexOf('certain') > 0 && HG.indexOf('never executed or called') > 0;
+    })());
+    T('V2 REPORT: noms hostiles échappés (XSS), aucun script injecté', (() => {
+      return HG.indexOf('&lt;script&gt;') > 0 && HG.toLowerCase().indexOf('<script') < 0;
+    })());
+    T('V2 REPORT: encodage d\'origine mentionné dans le log (EBCDIC → "decoded from")', (() => {
+      state.files = [ { name: 'E.JCL', lang: 'JCL', text: '//E JOB 1', encoding: 'EBCDIC CP037 (auto-detected)' } ];
+      state.files.forEach(f => parseFile(f));
+      state.loaded = true; state.log = []; state._model = null;
+      buildLog();
+      return state.log.some(l => (l.text || '').indexOf('decoded from EBCDIC CP037') >= 0);
+    })());
+    state.files = bakG.files; state.loaded = bakG.loaded; state.log = bakG.log; state._model = null;
   } catch (e){
     out.push({ name: 'V2 suite crashed: ' + e.message, pass: false });
   } finally {
@@ -1811,7 +2352,11 @@ function parseFile(f){
     f.parsed = { engine: 'v3', cobol: C, warnings: C.warns,
       programId: f.lang === 'CBL' ? C.programId : null,
       copies: C.copyUsed.map(c => ({ name: c.name, resolved: !!c.resolved })),
-      sqlCount: C.sql.length, cicsCount: C.cics.length, performs: C.performs.length, gotos: C.gotos.length };
+      sqlCount: C.sql.length, cicsCount: C.cics.length, performs: C.performs.length, gotos: C.gotos.length, deadCount: (C.dead||[]).length };
+  } else if (f.lang === 'REXX'){
+    const R = parseREXX(f.name, t);
+    f.parsed = { engine: 'v3', rexx: R, warnings: R.warns,
+      programId: R.execName, calls: R.calls.length, dsns: R.dsns.length };
   }
   state._model = null; // le graphe doit être reconstruit
 }
@@ -1834,6 +2379,8 @@ function buildGraph(){
         const steps = (jb.steps||[]).map(s => ({
           name: s.name, pgm: s.target, kind: s.kind,
           proc: s.proc || null, via: s.via || null, condition: s.condition || null,
+          sortInfo: s.sortInfo || null, rexxExec: s.rexxExec || null,
+          cond: s.cond || null, rd: s.rd || null,
           dds: s.dds || []
         }));
         const dsns = [...new Set((jb.steps||[]).flatMap(s => (s.dds||[]))
@@ -1842,7 +2389,7 @@ function buildGraph(){
           parsed: { steps, dsns, warnings: (f.parsed && f.parsed.warnings) || [] } });
       });
     }
-    else if (f.lang === 'CBL') g.programs.push(f);
+    else if (f.lang === 'CBL' || f.lang === 'REXX') g.programs.push(f);
     else if (f.lang === 'CPY') g.copybooks.push(f);
   });
   g.jobs.forEach(j=>{
@@ -1887,20 +2434,117 @@ function stepDesc(s){
     const c = s.condition, txt = c && c.text ? c.text : String(c);
     parts.push(`<span style="color:var(--yellow)">if ${c && c.neg ? 'NOT ' : ''}${esc(c && c.neg ? '(' + txt + ')' : txt)}</span>`);
   }
+  if (s.sortInfo){
+    const si = s.sortInfo;
+    const f = si.type === 'copy' ? 'FIELDS=COPY'
+      : (si.fields.length ? 'FIELDS=' + si.fields.map(x => `${x.pos}:${x.len} ${x.type} ${x.order}`).join(', ')
+       : 'fields not decoded');
+    parts.push(`<span style="color:var(--blue)">SORT ${esc(f)}${si.sum ? ' · SUM ' + esc(si.sum) : ''}</span>`);
+  }
+  if (s.rexxExec) parts.push(`<span style="color:var(--purple)">SYSTSIN EXEC '${esc(s.rexxExec)}' (REXX/CLIST)</span>`);
+  if (s.cond) parts.push(`<span style="color:var(--yellow)">COND ${esc(String(s.cond))} (not evaluated)</span>`);
+  if (s.rd) parts.push(`<span style="color:var(--yellow)">RD=${esc(String(s.rd))} (restart)</span>`);
   return parts.join(' · ');
 }
 
 // ══════════════════ 2. GESTION DES FICHIERS ══════════════════
 
+// ── Décodage honnête des octets : UTF-8 (+BOM), UTF-16, EBCDIC CP037 (sous-ensemble) ──
+// Les fichiers z/OS descendent souvent en EBCDIC : sans décodage, l'analyse est
+// impossible (mojibake). Sous-ensemble CP037 documenté : lettres/chiffres/ponctuation
+// COBOL-JCL ; tout octet hors table → '?' (compté, jamais deviné).
+const CP037 = (() => {
+  const T = new Array(256).fill(null);
+  T[0x00] = '\u0000'; T[0x0D] = '\r'; T[0x05] = '\t'; T[0x25] = '\n';
+  T[0x40] = ' ';
+  for (let i = 0; i < 10; i++) T[0xF0 + i] = String(i);
+  const UP = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', LO = 'abcdefghijklmnopqrstuvwxyz';
+  for (let i = 0; i < 9; i++) T[0x81 + i] = LO[i];
+  for (let i = 0; i < 9; i++) T[0x91 + i] = LO[9 + i];
+  for (let i = 0; i < 8; i++) T[0xA2 + i] = LO[18 + i];
+  for (let i = 0; i < 9; i++) T[0xC1 + i] = UP[i];
+  for (let i = 0; i < 9; i++) T[0xD1 + i] = UP[9 + i];
+  for (let i = 0; i < 8; i++) T[0xE2 + i] = UP[18 + i];
+  const P = { 0x4A:'¢', 0x4B:'.', 0x4C:'<', 0x4D:'(', 0x4E:'+', 0x4F:'|', 0x50:'&',
+    0x5A:'!', 0x5B:'$', 0x5C:'*', 0x5D:')', 0x5E:';', 0x5F:'¬', 0x60:'-', 0x61:'/',
+    0x6B:',', 0x6C:'%', 0x6D:'_', 0x6E:'>', 0x6F:'?', 0x7A:':', 0x7B:'#', 0x7C:'@',
+    0x7D:"'", 0x7E:'=', 0x7F:'"', 0xAD:'[', 0xBD:']', 0xC0:'{', 0xD0:'}' };
+  for (const k of Object.keys(P)) T[+k] = P[k];
+  return T;
+})();
+function ebcdicDecode(b){
+  let out = '', unmapped = 0;
+  for (let i = 0; i < b.length; i++){
+    const ch = CP037[b[i]];
+    if (ch === null){ unmapped++; out += '?'; } else out += ch;
+  }
+  return { text: out, unmapped };
+}
+// Heuristique transparente : un fichier EBCDIC est dominé par des octets ≥ 0x81
+// (lettres/chiffres) et pauvre en octets ASCII imprimables. Un fichier UTF-8/Latin-1
+// est l'inverse (accent inclus) — jamais converti par erreur. Ambiguïté documentée :
+// la ponctuation EBCDIC (0x4A-0x7F) chevauche les lettres ASCII ; c'est la densité
+// globale qui décide, jamais un octet isolé.
+function looksEbcdic(b){
+  if (!b.length) return false;
+  let high = 0, printable = 0, n = 0;
+  for (let i = 0; i < b.length && n < 8192; i++, n++){
+    const c = b[i];
+    if (c >= 0x81) high++;
+    else if ((c >= 0x20 && c <= 0x7E) || c === 0x09 || c === 0x0A || c === 0x0D) printable++;
+  }
+  return high > n * 0.3 && printable < n * 0.5;
+}
+function utf8Decode(b){
+  let out = '';
+  for (let i = 0; i < b.length; ){
+    const c = b[i];
+    if (c < 0x80){ out += String.fromCharCode(c); i++; continue; }
+    if (c >= 0xC2 && c < 0xE0 && (b[i+1] & 0xC0) === 0x80){ out += String.fromCharCode(((c & 0x1F) << 6) | (b[i+1] & 0x3F)); i += 2; continue; }
+    if (c >= 0xE0 && c < 0xF0 && (b[i+1] & 0xC0) === 0x80 && (b[i+2] & 0xC0) === 0x80){ out += String.fromCharCode(((c & 0x0F) << 12) | ((b[i+1] & 0x3F) << 6) | (b[i+2] & 0x3F)); i += 3; continue; }
+    if (c >= 0xF0 && c < 0xF8 && (b[i+1] & 0xC0) === 0x80 && (b[i+2] & 0xC0) === 0x80 && (b[i+3] & 0xC0) === 0x80){ out += String.fromCodePoint(((c & 0x07) << 18) | ((b[i+1] & 0x3F) << 12) | ((b[i+2] & 0x3F) << 6) | (b[i+3] & 0x3F)); i += 4; continue; }
+    out += '\uFFFD'; i++;
+  }
+  return out;
+}
+function utf16Decode(b, bigEndian){
+  let out = '';
+  for (let i = 2; i + 1 < b.length; i += 2)
+    out += String.fromCharCode(bigEndian ? (b[i] << 8) | b[i+1] : (b[i+1] << 8) | b[i]);
+  return out;
+}
+function decodeBytes(b){
+  if (b.length >= 3 && b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF)
+    return { text: utf8Decode(b.subarray(3)), enc: 'utf-8 (BOM removed)' };
+  if (b.length >= 2 && b[0] === 0xFF && b[1] === 0xFE)
+    return { text: utf16Decode(b, false), enc: 'utf-16le (BOM)' };
+  if (b.length >= 2 && b[0] === 0xFE && b[1] === 0xFF)
+    return { text: utf16Decode(b, true), enc: 'utf-16be (BOM)' };
+  if (looksEbcdic(b)){
+    const r = ebcdicDecode(b);
+    return { text: r.text, enc: 'EBCDIC CP037 (auto-detected' + (r.unmapped ? ', ' + r.unmapped + ' unmapped byte(s) shown as ?' : '') + ')' };
+  }
+  return { text: utf8Decode(b), enc: 'utf-8' };
+}
+async function readTextSmart(f){
+  try {
+    const buf = await f.arrayBuffer();
+    return decodeBytes(new Uint8Array(buf));
+  } catch(e){
+    try { return { text: await f.text(), enc: 'utf-8 (fallback: arrayBuffer unavailable)' }; }
+    catch(e2){ return { text: '', enc: 'unreadable' }; }
+  }
+}
+
 async function handleFiles(fl){
   const arr = [...fl];
   if (!arr.length) return;
   for (const f of arr){
-    let text = '';
-    try { text = await f.text(); } catch(e){}
+    const rd = await readTextSmart(f);
+    let text = rd.text;
     if (isReforgeProject(f.name, text)){ await importProject(text); continue; }
     const lang = detectLang(f.name, text);
-    const nf = { name:f.name, lang, text, lines:text.split('\n').length, sample:false };
+    const nf = { name:f.name, lang, text, lines:text.split('\n').length, sample:false, encoding: rd.enc };
     parseFile(nf);
     // remplace un fichier homonyme
     const i = state.files.findIndex(x=>x.name===nf.name);
@@ -1945,9 +2589,13 @@ function buildLog(){
   const L = []; const add = (cls,text)=>L.push({cls,text});
   add('info', `[parse] ${state.files.length} file(s) received — COBOL engine v3 (structure, variables, I/O, SQL), JCL engine v2 (statements, PROC, backrefs)`);
   state.files.forEach(f=>{
-    const why = f.lang==='JCL' ? 'JCL statements (engine v2)' : f.lang==='CBL' ? 'PROGRAM-ID found' : f.lang==='CPY' ? 'record layout' : 'unknown format';
-    add('ok', `[ok] ${f.name} → ${f.lang} (${why})`);
+    const why = f.lang==='JCL' ? 'JCL statements (engine v2)' : f.lang==='CBL' ? 'PROGRAM-ID found' : f.lang==='CPY' ? 'record layout' : f.lang==='REXX' ? 'REXX exec (/* REXX */ or .REX/.EXEC)' : 'unknown format';
+    add('ok', `[ok] ${f.name} → ${f.lang} (${why})${f.encoding && f.encoding !== 'utf-8' ? ' — decoded from ' + f.encoding : ''}`);
     (f.parsed.warnings||[]).forEach(w=>add('warn', `[v3] ${f.name}: ${w}`));
+    if (f.lang==='REXX' && f.parsed.rexx){
+      const R = f.parsed.rexx;
+      add('info', `[v3] ${R.execName || f.name}: REXX exec — ${R.calls.length} CALL(s), ${R.dsns.length} dataset reference(s)`);
+    }
     if (f.lang==='JCL' && f.parsed.procs && Object.keys(f.parsed.procs).length)
       add('info', `[v3] ${f.name}: PROC definition(s) available: ${Object.keys(f.parsed.procs).join(', ')}`);
     if (f.lang==='JCL' && f.parsed.jobs) f.parsed.jobs.forEach(jb=>{
@@ -2192,7 +2840,8 @@ function resultsMD(){
     const sql = m.edges.filter(e => e.f === p.id && String(e.k).startsWith('sql-'));
     const calls = m.edges.filter(e => e.f === p.id && e.k === 'call');
     const paras = m.edges.filter(e => e.f === p.id && e.k === 'contains' && e.t.startsWith('para|'));
-    L.push('- **' + p.name + '** : ' + paras.length + ' paragraph(s), ' + uses.length + ' copybook(s), ' + sql.length + ' SQL table access(es), ' + calls.length + ' call(s)');
+    const dcount = paras.filter(e => { const pn = m.nodes.get(e.t); return pn && pn.data && pn.data.dead; }).length;
+    L.push('- **' + p.name + '** : ' + paras.length + ' paragraph(s), ' + uses.length + ' copybook(s), ' + sql.length + ' SQL table access(es), ' + calls.length + ' call(s)' + (dcount ? ' — ⚠ ' + dcount + ' unreachable paragraph(s)' : ''));
   });
   L.push('');
   L.push('## Datasets');
@@ -2280,6 +2929,66 @@ function downloadResults(fmt){
   track('export_results_' + fmt);
 }
 
+// ── Rapport de contrôle : document HTML autonome pour l'audit — inventaire,
+// constats par sévérité, confiance des relations, couverture honnête ──
+function controlReportHTML(){
+  const m = getModel();
+  const byT = t => [...m.nodes.values()].filter(n => n.type === t).length;
+  const cnt = c => m.edges.filter(e => e.c === c).length;
+  const wBy = s => m.warnings.filter(w => warnSeverity(w) === s);
+  const w1 = wBy(1), w2 = wBy(2), w3 = wBy(3);
+  const kinds = {};
+  m.edges.forEach(e => { kinds[e.k] = (kinds[e.k] || 0) + 1; });
+  const kindRows = Object.entries(kinds).sort((a, b) => b[1] - a[1])
+    .map(([k, n]) => '<tr><td>' + esc(k) + '</td><td>' + n + '</td></tr>').join('');
+  const fileRows = state.files.map(f =>
+    '<tr><td>' + esc(f.name) + '</td><td>' + esc(f.lang) + '</td><td>' + (f.lines || 0) + '</td><td>' +
+    esc(f.encoding || 'utf-8') + '</td><td>' + esc((f.parsed && (f.parsed.programId || f.parsed.rexx && f.parsed.rexx.execName)) || '—') + '</td></tr>').join('');
+  const warnRows = (arr, label, color) => !arr.length ? '' :
+    '<h3 style="color:' + color + '">' + label + ' (' + arr.length + ')</h3><ul>' +
+    arr.map(w => '<li>' + esc(w) + '</li>').join('') + '</ul>';
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Reforge control report</title><style>' +
+    'body{font-family:ui-monospace,Menlo,monospace;background:#0d1117;color:#c9d1d9;max-width:900px;margin:24px auto;padding:0 16px;line-height:1.6}' +
+    'h1{font-size:20px}h3{font-size:14px;margin:18px 0 6px}table{border-collapse:collapse;width:100%;font-size:12px}' +
+    'td,th{border:1px solid #30363d;padding:4px 8px;text-align:left}.note{color:#8b949e;font-size:12px}' +
+    '</style></head><body>' +
+    '<h1>Reforge — control report</h1>' +
+    '<p class="note">Generated ' + esc(new Date().toISOString()) + ' · offline analysis · every relation carries evidence and a confidence level</p>' +
+    '<h3>1. Inventory</h3><table><tr><th>Jobs</th><th>Steps</th><th>Programs</th><th>Copybooks</th><th>Datasets</th><th>DB2 tables</th><th>CICS files/maps/queues</th><th>Relations</th></tr>' +
+    '<tr><td>' + byT('job') + '</td><td>' + byT('step') + '</td><td>' + byT('prog') + '</td><td>' + byT('cpy') + '</td><td>' + byT('ds') + '</td><td>' + byT('tbl') + '</td><td>' + byT('fct') + '/' + byT('map') + '/' + byT('q') + '</td><td>' + m.edges.length + '</td></tr></table>' +
+    '<h3>Files analyzed</h3><table><tr><th>File</th><th>Lang</th><th>Lines</th><th>Encoding</th><th>Program / Exec</th></tr>' + fileRows + '</table>' +
+    '<h3>2. Confidence of relations</h3><table><tr><th>Confidence</th><th>Count</th></tr>' +
+    '<tr><td>certain (evidence chain complete)</td><td>' + cnt('certain') + '</td></tr>' +
+    '<tr><td>probable (trace, not confirmed)</td><td>' + cnt('probable') + '</td></tr>' +
+    '<tr><td>unknown (referenced, nature unresolved)</td><td>' + cnt('unknown') + '</td></tr></table>' +
+    '<table style="margin-top:8px"><tr><th>Relation kind</th><th>Count</th></tr>' + kindRows + '</table>' +
+    '<h3>3. Findings by severity</h3>' +
+    '<p class="note">1 = blocking for understanding · 2 = uncertainty · 3 = informational. Full list, nothing filtered.</p>' +
+    warnRows(w1, 'Severity 1 — blocking', '#f85149') +
+    warnRows(w2, 'Severity 2 — uncertainty', '#d29922') +
+    warnRows(w3, 'Severity 3 — informational', '#8b949e') +
+    (!m.warnings.length ? '<p class="note">No warning raised on this set.</p>' : '') +
+    '<h3>4. Coverage and known limits (documented, not hidden)</h3>' +
+    '<ul class="note"><li>COBOL: structure, variables, SELECT/FD I/O chains, SQL, EXEC CICS (FILE/DATASET/MAP/QUEUE/XCTL/LINK), dead code, copybooks.</li>' +
+    '<li>JCL: statements, PROC expansion, symbolics, backrefs, IF/ELSE and COND captured but <b>never evaluated</b> (return codes unknown offline), RD/RERUN flagged, not simulated.</li>' +
+    '<li>REXX: literal CALL and quoted datasets only (references, never claimed read/write); SORT/DFSORT inline cards decoded (subset); IKJEFT01 SYSTSIN members expanded only if uploaded.</li>' +
+    '<li>Anything not uploaded (cataloged procs, datasets with sort cards, external programs) is flagged — never invented.</li>' +
+    '<li>EBCDIC decoding covers the CP037 printable subset; unmapped bytes appear as ? (counted).</li></ul>' +
+    '<h3>5. How to verify</h3>' +
+    '<p class="note">In the app: Debug view → Engine self-tests and V2 suite (or URL ?selftest) — all must pass. Every relation in the map lists its evidence (file, line, note).</p>' +
+    '</body></html>';
+}
+function downloadControlReport(){
+  if (!state.files.length) return;
+  const blob = new Blob([controlReportHTML()], { type: 'text/html' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'reforge-control-report.html';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  track('export_control_report');
+}
+
 // ── Export / import de projet (.json) ──
 function exportProject(){
   if (!state.files.length) return;
@@ -2322,7 +3031,7 @@ async function importProject(text){
 
 // ── Télémétrie légère (compteurs d'usage GA, jamais de noms de fichiers) ──
 function track(name){
-  try { if (typeof gtag === 'function') gtag('event', name); } catch(e){}
+  try { if (typeof window.gtag === 'function') window.gtag('event', name); } catch(e){}
 }
 
 // ══════════════════ 6. PANNEAUX ══════════════════
@@ -2352,8 +3061,9 @@ const PANELS = {
     const progCards = Object.entries(m.internal).map(([pname,inn])=>`
       <div class="card" style="max-width:620px;margin-bottom:14px">
         <h3>${esc(pname)} — program flow</h3>
-        ${inn.paragraphs.length ? `<p class="note">Paragraphs: ${inn.paragraphs.map(p=>`<span class="pill pill-io">${esc(p.name)}</span>`).join(' ')}</p>` : '<p class="note">No paragraph detected.</p>'}
-        ${inn.edges.length ? inn.edges.map(e=>`<div class="step-sub"><span class="mono" style="color:var(--accent)">${esc(e.from||'—')}</span> <span style="color:var(--purple)">—${e.k==='goto'?'GO TO':'PERFORM'}→</span> <span class="mono">${esc(e.to)}</span> <span class="note">(L${e.ln})</span></div>`).join('') : '<p class="note">No PERFORM / GO TO between paragraphs detected in this program.</p>'}
+        ${inn.paragraphs.length ? `<p class="note">Paragraphs: ${inn.paragraphs.map(p=>{ const d = (inn.dead||[]).some(x=>x.name===p.name); return `<span class="pill pill-io"${d?' style="text-decoration:line-through;opacity:.55" title="unreachable — dead code"':''}>${esc(p.name)}${d?' ☠':''}</span>`; }).join(' ')}</p>` : '<p class="note">No paragraph detected.</p>'}
+        ${(inn.dead||[]).length ? `<p class="note" style="color:var(--yellow)">☠ Unreachable (${(inn.dead||[]).length}): ${(inn.dead||[]).map(d=>esc(d.name)+' (L'+d.ln+')').join(' · ')} — no PERFORM/GO TO target, no fall-through path. Verify before deleting.</p>` : ''}
+        ${inn.edges.length ? inn.edges.map(e=>`<div class="step-sub"><span class="mono" style="color:var(--accent)">${esc(e.from||'—')}</span> <span style="color:var(--purple)">—${e.k==='goto'?'GO TO':e.k==='handle'?'HANDLE':'PERFORM'}→</span> <span class="mono">${esc(e.to)}</span> <span class="note">(L${e.ln})</span></div>`).join('') : '<p class="note">No PERFORM / GO TO between paragraphs detected in this program.</p>'}
       </div>`).join('');
     if (!jobCards && !progCards) return emptyState('🔀','No job or program found','Job steps are detected from //STEP EXEC PGM= statements.');
     return jobCards + progCards;
@@ -2365,8 +3075,10 @@ const PANELS = {
     const rows = [];
     [...m.nodes.values()].filter(n=>n.type==='prog').forEach(n=>{
       const f = state.files.find(x=>x.lang==='CBL' && x.parsed.cobol && x.parsed.cobol.programId===n.name);
-      const callers = (m.rev[n.id]||[]).filter(e=>e.k==='exec').map(e=>nodeLabel(e.f)).join(', ');
-      rows.push({name:n.name, lang:'COBOL', ext:false, lines:f?f.lines:'—', by:callers||'—'});
+      const rf = n.data && n.data.rexx ? state.files.find(x=>x.lang==='REXX' && x.parsed.rexx && x.parsed.rexx.execName===n.name) : null;
+      const callers = (m.rev[n.id]||[]).filter(e=>e.k==='exec'||e.k==='call').map(e=>nodeLabel(e.f)).join(', ');
+      const lonely = !(m.rev[n.id]||[]).some(e=>e.k==='exec'||e.k==='call');
+      rows.push({name:n.name, lang: rf ? 'REXX' : 'COBOL', ext:false, lonely, lines:(rf||f)?(rf||f).lines:'—', by:callers||'—'});
     });
     [...m.nodes.values()].filter(n=>n.type==='xpgm').forEach(n=>{
       const callers = (m.rev[n.id]||[]).map(e=>nodeLabel(e.f)).join(', ');
@@ -2377,9 +3089,9 @@ const PANELS = {
     });
     if (!rows.length) return emptyState('🖥','No program detected','Drop JCL or COBOL files to populate this view.');
     return `<div class="card"><table class="tbl">
-      <tr><th>Program / Job</th><th>Language</th><th>Lines</th><th>Called by (step)</th></tr>
-      ${rows.map(r=>`<tr><td>${esc(r.name)}${r.ext?' <span class="pill" style="color:var(--yellow);border:1px solid var(--yellow)">EXTERNAL</span>':''}</td><td><span class="pill pill-io">${r.lang}</span></td><td>${r.lines}</td><td>${esc(r.by)}</td></tr>`).join('')}
-    </table><p class="note">EXTERNAL = referenced by EXEC/CALL but not uploaded. “Called by” lists the JCL steps detected with evidence.</p></div>`;
+      <tr><th>Program / Job</th><th>Language</th><th>Lines</th><th>Called by</th></tr>
+      ${rows.map(r=>`<tr><td>${esc(r.name)}${r.ext?' <span class="pill" style="color:var(--yellow);border:1px solid var(--yellow)">EXTERNAL</span>':''}${r.lonely?' <span class="pill" style="color:var(--yellow);border:1px solid var(--yellow)">NEVER CALLED?</span>':''}</td><td><span class="pill pill-io">${r.lang}</span></td><td>${r.lines}</td><td>${esc(r.by)}</td></tr>`).join('')}
+    </table><p class="note">EXTERNAL = referenced by EXEC/CALL but not uploaded. NEVER CALLED? = no detected caller within the analyzed set (could be scheduled elsewhere). “Called by” lists detected callers (JCL steps, CALL/XCTL from other programs) with evidence.</p></div>`;
   },
 
   data: () => {
@@ -2523,6 +3235,7 @@ const PANELS = {
       <button class="analyze-btn" style="width:auto" onclick="downloadResults('json')">📄 Results JSON</button>
       <button class="analyze-btn" style="width:auto;margin-left:8px" onclick="downloadResults('csv')">📊 Relations CSV</button>
       <button class="analyze-btn" style="width:auto;margin-left:8px" onclick="downloadResults('md')">📝 Markdown report</button>
+      <button class="analyze-btn" style="width:auto;margin-left:8px" onclick="downloadControlReport()">📋 Control report (HTML)</button>
     </div>`;
   },
 
@@ -2595,7 +3308,7 @@ const PANELS = {
       <div class="log">${state._testResults.map(t=>`<span class="${t.pass?'ok':'warn'}">${t.pass?'✓':'✗'} ${esc(t.name)}</span>`).join('<br>')}</div>
     </div>` : '';
     const v2Area = state._v2Results ? `<div class="card" style="max-width:760px;margin-bottom:14px">
-      <h3>V2 suite (FD/01, continuations, SQL, JCL, graphe, CICS, XSS): ${state._v2Results.filter(t=>t.pass).length}/${state._v2Results.length} passed</h3>
+      <h3>V2 suite (FD/01, SQL, JCL, CICS, dead code, REXX/SORT, JCL finesse, encodings, XSS): ${state._v2Results.filter(t=>t.pass).length}/${state._v2Results.length} passed</h3>
       <div class="log">${state._v2Results.map(t=>`<span class="${t.pass?'ok':'warn'}">${t.pass?'✓':'✗'} ${esc(t.name)}</span>`).join('<br>')}</div>
     </div>` : '';
     const logArea = state.loaded ? `<div class="card log" style="max-width:760px">
@@ -2604,8 +3317,8 @@ const PANELS = {
     return `
     <div class="toolbar">
       <button class="analyze-btn" style="width:auto" onclick="state._testResults=runSelfTests();renderContent()">⚙ Engine self-tests</button>
-      <button class="analyze-btn" style="width:auto" onclick="state._v2Results=runV2Tests();renderContent()">⚙ V2 suite (FD/01, SQL, JCL, CICS, XSS)</button>
-      <button class="analyze-btn" style="width:auto" onclick="toggleTelemetry()">${telemetryOn() ? '📡 Telemetry ON' : '📡 Telemetry OFF (opt-in)'}</button>
+      <button class="analyze-btn" style="width:auto" onclick="state._v2Results=runV2Tests();renderContent()">⚙ V2 suite (FD/01, SQL, JCL, CICS, dead code, REXX/SORT, JCL finesse, encodings, XSS)</button>
+      <button class="analyze-btn" style="width:auto" onclick="toggleTelemetry()">${telemetryOn() ? '📡 Telemetry ON (click to disable)' : '📡 Telemetry disabled'}</button>
     </div>
     ${testArea}
     ${v2Area}
@@ -2614,10 +3327,17 @@ const PANELS = {
       • Dynamic SQL (PREPARE/EXECUTE): statement text unknown → no table extracted, explicit warning.<br>
       • Cataloged PROCs / INCLUDE members: resolved only if uploaded in the project.<br>
       • Literal continuation: resumed at the apostrophe; column 16-71 spaces of the first line are not re-padded.<br>
-      • EXEC CICS: FILE/DATASET (FCT), MAP, QUEUE (TSQ/TDQ), XCTL/LINK handled. FILE(variable) dynamic not resolved (no edge); HANDLE/AID control flow not modeled; DLI/IMS and REXX not analyzed — no relation invented.<br>
+      • EXEC CICS: FILE/DATASET (FCT), MAP, QUEUE (TSQ/TDQ), XCTL/LINK handled. FILE(variable) resolved only when the constant is traced in the code (MOVE 'X' TO var / level-88) → probable; unknown value → no edge. HANDLE CONDITION/AID paragraph targets and HANDLE ABEND PROGRAM handled. IGNORE CONDITION and DLI/IMS not analyzed — no relation invented.<br>
+      • REXX: exec detected (.REX/.EXEC or /* REXX */), CALL 'literal' → program edge, datasets quoted → "references" edge with unknown access type (never claimed read/write). CALL via variable → warning, no invented edge. IKJEFT01: EXEC 'member' of SYSTSIN expanded only if the exec is uploaded. ADDRESS/host commands not analyzed.<br>
+      • SORT (DFSORT): SYSIN inline cards decoded (FIELDS=(p,l,type,order) or COPY, FORMAT=, SUM). INCLUDE/OMIT/INREC/OUTREC/OUTFIL recognized but not decoded. SYSIN from a dataset not uploaded → sort fields unknown (warning). ICEGENER not analyzed.<br>
+      • JCL IF/ELSE and EXEC COND=: captured and displayed with their condition, but the condition itself is NEVER evaluated (return codes unknown offline) — conditional steps are flagged, not skipped or simulated. RD/RERUN (restart): captured and flagged as informational; a restarted step may run twice, so run counts are never claimed.<br>
+      • Warnings are sorted by severity: blocking (member/program missing, never called) first, then uncertainties (unknown value, dead code), then informational (restart, conditions). Stable within each level.<br>
+      • Encodings: UTF-8 (with or without BOM), UTF-16 (BOM) and EBCDIC CP037 (printable subset) auto-detected at upload; unmapped EBCDIC bytes appear as ? (counted in the log). Other code pages (CP1140 accented, DBCS) are not converted — flagged, never guessed.<br>
+      • Control report (HTML export): standalone audit document built from the live model — inventory, findings by severity, relation confidence, coverage and limits. Nothing filtered, everything escaped.<br>
       • PERFORM/GOTO to an undefined target: flagged as warning, no edge created.<br>
+      • Dead code: paragraphs declared unreachable only when certain (no PERFORM/GO TO target, no fall-through path). DECLARATIVES/USE and ALTER disable the analysis (implicit/dynamic targets). Programs never called are flagged as questions, not facts (code not uploaded may call them).<br>
       • AI: not implemented — no simulated output.<br>
-      • Telemetry: OFF by default (opt-in above). Source files never leave the browser (IndexedDB local, export by your action only).</p></div>`;
+      • Telemetry (Google Analytics): ON by default — anonymized usage stats only, never source code, never analysis results. Disable anytime via the Debug button; choice persisted locally.</p></div>`;
   },
 };
 
@@ -2646,7 +3366,7 @@ function switchSub(id){ state.sub = id; renderNav(); renderContent(); }
 
 // ══════════════════ 8. PANNEAU GAUCHE ══════════════════
 
-function fIcon(lang){ return lang==='JCL' ? '📄' : lang==='CPY' ? '📋' : lang==='CBL' ? '🖥' : '❓'; }
+function fIcon(lang){ return lang==='JCL' ? '📄' : lang==='CPY' ? '📋' : lang==='CBL' ? '🖥' : lang==='REXX' ? '🦖' : '❓'; }
 
 function renderLeft(){
   document.getElementById('fileList').innerHTML = state.files.map((f,i)=>`
@@ -2765,24 +3485,30 @@ function loadSample(){
   renderLeft(); renderNav(); renderContent();
 }
 
-// ── Télémétrie (Google Analytics) : OFF par défaut, opt-in explicite ──
-// Aucun script externe n'est chargé avant consentement ; état persisté en localStorage.
-function telemetryOn(){ try { return localStorage.getItem('reforge_telemetry') === '1'; } catch(e){ return false; } }
+// ── Télémétrie (Google Analytics) : ON par défaut, opt-out persistant ──
+// Chargée au boot ; désactivable depuis Debug (localStorage 'reforge_telemetry' = '0').
+// Seuls des événements d'usage anonymisés sont envoyés — jamais de code source.
+function telemetryOn(){ try { return localStorage.getItem('reforge_telemetry') !== '0'; } catch(e){ return true; } }
+let gtagLoaded = false;
+function loadGtag(){
+  if (!telemetryOn() || gtagLoaded || typeof window.gtag === 'function') return;
+  try {
+    const s = document.createElement('script');
+    s.id = 'gtag-js'; s.async = true; s.src = 'https://www.googletagmanager.com/gtag/js?id=G-TMZLXLY7BC';
+    document.head.appendChild(s);
+    window.dataLayer = window.dataLayer || [];
+    window.gtag = function(){ window.dataLayer.push(arguments); };
+    window.gtag('js', new Date()); window.gtag('config', 'G-TMZLXLY7BC');
+    gtagLoaded = true;
+  } catch(e){}
+}
 function toggleTelemetry(){
   const on = !telemetryOn();
   try { localStorage.setItem('reforge_telemetry', on ? '1' : '0'); } catch(e){}
-  if (on && typeof gtag !== 'function' && !document.getElementById('gtag-js')){
-    try {
-      const s = document.createElement('script');
-      s.id = 'gtag-js'; s.async = true; s.src = 'https://www.googletagmanager.com/gtag/js?id=G-TMZLXLY7BC';
-      document.head.appendChild(s);
-      window.dataLayer = window.dataLayer || [];
-      window.gtag = function(){ window.dataLayer.push(arguments); };
-      gtag('js', new Date()); gtag('config', 'G-TMZLXLY7BC');
-    } catch(e){}
-  }
+  if (on) loadGtag();
   renderContent();
 }
+loadGtag();
 
 // ══════════════════ 10. WIRING ══════════════════
 
