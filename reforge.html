@@ -243,6 +243,8 @@ function detectLang(name, text){
   if (/\bPIC(TURE)?\s+[S9VX]/i.test(text) && !/\bPROCEDURE DIVISION\b/.test(t)) return 'CPY';
   if (/\b(DIVISION|SECTION)\b/.test(t)) return 'CBL';
   if (ext === 'CBL' || ext === 'COB' || ext === 'CB2') return 'CBL';
+  // Scheduler export : extension dédiée ou format JOB <job> AFTER <prédécesseurs>
+  if (ext === 'SCH' || ext === 'SCHED' || /^JOB\s+[A-Z0-9@#$.\-]+\s+AFTER\b/m.test(t)) return 'SCHED';
   return 'TXT';
 }
 
@@ -266,13 +268,28 @@ const EXEC_STD_PARAMS = new Set([
 function tokenizeStatements(text, warnings){
   const statements = [];
   const lines = text.split(/\r?\n/);
-  let inStreamData = false, curInline = null;
+  let inStreamData = false, curInline = null, inDlm = null, inData = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].slice(0, 72).trimEnd();
     const ln = i + 1;
     if (!line.trim()) continue;
     if (inStreamData) {
-      if (line.startsWith('/*') || line.startsWith('//')) { inStreamData = false; curInline = null; }
+      // Règles JCL Reference (honnêtes, testées) :
+      //  • DLM='xx' codé : SEUL le délimiteur termine les données — les lignes
+      //    commençant par // ou /* sont des DONNÉES (c'est le but du DLM).
+      //  • DD DATA sans DLM : /* termine les données, mais les lignes //
+      //    sont des DONNÉES (différence DATA vs *).
+      //  • DD * sans DLM : // ou /* terminent (comportement historique).
+      if (inDlm) {
+        if (line.trim().toUpperCase() === inDlm) { inStreamData = false; curInline = null; inDlm = null; inData = false; continue; }
+        if (curInline) curInline.push({ ln, text: line });
+        continue;
+      }
+      if (line.startsWith('/*')) { inStreamData = false; curInline = null; inData = false; }
+      else if (line.startsWith('//')) {
+        if (inData) { if (curInline) curInline.push({ ln, text: line }); continue; } // DD DATA : // est une donnée
+        inStreamData = false; curInline = null; inData = false;
+      }
       else { if (curInline) curInline.push({ ln, text: line }); continue; }
     }
     if (line.startsWith('/*')) continue;
@@ -313,7 +330,12 @@ function tokenizeStatements(text, warnings){
       }
     }
     const st = { name, op, operands: operands.trim(), line: ln };
-    if (op === 'DD' && /^(\*|DATA\b)/.test(operands.trim())) { inStreamData = true; curInline = st.inline = []; }
+    if (op === 'DD' && /^(\*|DATA\b)/.test(operands.trim())) {
+      inStreamData = true; curInline = st.inline = [];
+      inData = /^DATA\b/.test(operands.trim());
+      const dm = operands.toUpperCase().match(/DLM\s*=\s*'([^']*)'/);
+      inDlm = dm ? dm[1] : null;
+    }
     statements.push(st);
   }
   return statements;
@@ -387,41 +409,57 @@ function buildDD(st, p, symbols){
 
 function linkProcs(result){
   for (const job of result.jobs) {
-    const expanded = [];
-    for (const step of job.steps) {
-      if (step.kind !== 'PROC' || !step.target) { expanded.push(step); continue; }
-      const proc = result.procs[step.target];
-      if (!proc) {
-        step.resolved = false;
-        expanded.push(step);
-        result.warnings.push(`${job.name}: PROC ${step.target} not found (external cataloged proc?)`);
-        job.procsUsed.push(step.target);
-        continue;
-      }
-      step.resolved = true;
-      job.procsUsed.push(proc.name);
-      const symbols = { ...proc.defaults, ...step.symbols };
-      for (const ps of proc.steps) {
-        const copy = JSON.parse(JSON.stringify(ps));
-        copy.proc = proc.name;
-        copy.via = step.name;
-        for (const dd of copy.dds) {
-          if (dd.name) {
-            dd.name = substitute(dd.name, symbols);
-            if (dd.name.includes('&')) copy.hasUnresolvedSymbols = true;
+    // Expansion itérative : un PROC imbriqué peut appeler un autre PROC —
+    // boucle jusqu'au point fixe (garde-fou 10), chaîne suivie pour détecter
+    // la récursion (PROC qui s'appelle lui-même : signalé, jamais expandu).
+    let guard = 0, changed = true;
+    while (changed && guard < 10){
+      changed = false; guard++;
+      const expanded = [];
+      for (const step of job.steps) {
+        if (step.kind !== 'PROC' || !step.target) { expanded.push(step); continue; }
+        if (step.resolved === false) { expanded.push(step); continue; } // déjà signalé (not found)
+        const proc = result.procs[step.target];
+        if (!proc) {
+          step.resolved = false;
+          expanded.push(step);
+          result.warnings.push(`${job.name}: PROC ${step.target} not found (external cataloged proc?)`);
+          job.procsUsed.push(step.target);
+          continue;
+        }
+        if ((step.chain || []).includes(step.target)){
+          expanded.push(step);
+          if (!result.warnings.some(w => w.includes(`recursive PROC ${step.target}`)))
+            result.warnings.push(`${job.name}: recursive PROC call to ${step.target} — not expanded`);
+          continue;
+        }
+        step.resolved = true;
+        changed = true;
+        job.procsUsed.push(proc.name);
+        const symbols = { ...proc.defaults, ...step.symbols };
+        for (const ps of proc.steps) {
+          const copy = JSON.parse(JSON.stringify(ps));
+          copy.proc = proc.name;
+          copy.via = step.name;
+          copy.chain = [...(step.chain || []), proc.name];
+          for (const dd of copy.dds) {
+            if (dd.name) {
+              dd.name = substitute(dd.name, symbols);
+              if (dd.name.includes('&')) copy.hasUnresolvedSymbols = true;
+            }
           }
+          for (const [ov, val] of Object.entries(step.overrides)) {
+            const parts = ov.split('.');
+            const ddname = parts.length >= 3 ? parts[1].toUpperCase() : parts[0].toUpperCase();
+            const param = (parts.length >= 3 ? parts.slice(2) : parts.slice(1)).join('.').toUpperCase();
+            const dd = copy.dds.find(d => (d.ddname || '').toUpperCase() === ddname);
+            if (dd) dd['ov_' + param] = val;
+          }
+          expanded.push(copy);
         }
-        for (const [ov, val] of Object.entries(step.overrides)) {
-          const parts = ov.split('.');
-          const ddname = parts.length >= 3 ? parts[1].toUpperCase() : parts[0].toUpperCase();
-          const param = (parts.length >= 3 ? parts.slice(2) : parts.slice(1)).join('.').toUpperCase();
-          const dd = copy.dds.find(d => (d.ddname || '').toUpperCase() === ddname);
-          if (dd) dd['ov_' + param] = val;
-        }
-        expanded.push(copy);
       }
+      job.steps = expanded;
     }
-    job.steps = expanded;
   }
 }
 
@@ -479,10 +517,159 @@ function parseSortCards(text){
     if (/^SUM\s+FIELDS\s*=\s*NONE\b/.test(card)){ info.sum = 'none'; continue; }
     const sm = card.match(/^SUM\s+FIELDS\s*=\s*(\([^)]*\)|[A-Z0-9,=]+)/);
     if (sm){ info.sum = sm[1]; continue; }
-    // INCLUDE/OMIT/INREC/OUTREC/OUTFIL/OPTION/RECORD/END : reconnues, non décodées (documenté)
-    if (/^(INCLUDE|OMIT|INREC|OUTREC|OUTFIL|OPTION|RECORD|MODS|DEBUG|END)\b/.test(card)) continue;
+    // INCLUDE/OMIT COND : décodage récursif, respect des littérales (C'…', X'…',
+    // virgules incluses) et des parenthèses. Formes décodées : (p,l,type,OP,val),
+    // forme courte (p,type,OP,val) avec FORMAT= global, comparaison champ-à-champ
+    // (p,l,type,OP,p2,l2), jointes par AND/OR (virgule = AND). Toute sous-condition
+    // inconnue → toute la carte reste brute et marquée non décodée — jamais devinée.
+    const im = card.match(/^(INCLUDE|OMIT)\s+COND\s*=\s*(.+?)\s*$/);
+    if (im){
+      const blk = { raw: im[2], conds: [], joins: [], decoded: false };
+      info[im[1] === 'INCLUDE' ? 'include' : 'omit'] = blk;
+      const TYPE = /^(CH|ZD|PD|BI|FS|AC)$/, OPR = /^(EQ|NE|GT|GE|LT|LE)$/;
+      const VAL = t => /^\d+$/.test(t) || /^C'[^']*'$/.test(t) || /^X'[0-9A-F]*'$/.test(t);
+      const splitTop = (s) => { // découpe au niveau 0, respecte '…' et (…)
+        const out = []; let d = 0, q = false, cur = '';
+        for (let i = 0; i < s.length; i++){
+          const ch = s[i];
+          if (q){ cur += ch; if (ch === "'") q = false; continue; }
+          if (ch === "'"){ q = true; cur += ch; continue; }
+          if (ch === '(') d++;
+          else if (ch === ')') d--;
+          if (ch === ',' && d === 0){ out.push(cur); cur = ''; continue; }
+          cur += ch;
+        }
+        out.push(cur);
+        return out.map(x => x.trim()).filter(Boolean);
+      };
+      const unwrap = (t) => { // retire les parenthèses englobantes (quote-aware)
+        while (t.startsWith('(') && t.endsWith(')')){
+          let d = 0, ok = true, q = false;
+          for (let i = 0; i < t.length; i++){
+            const ch = t[i];
+            if (q){ if (ch === "'") q = false; continue; }
+            if (ch === "'"){ q = true; continue; }
+            if (ch === '(') d++;
+            else if (ch === ')'){ d--; if (d === 0 && i < t.length - 1){ ok = false; break; } }
+          }
+          if (!ok) break;
+          t = t.slice(1, -1).trim();
+        }
+        return t;
+      };
+      const parseCond = toks => {
+        if (toks.length === 5 && /^\d+$/.test(toks[0]) && /^\d+$/.test(toks[1]) && TYPE.test(toks[2]) && OPR.test(toks[3]) && VAL(toks[4]))
+          return { pos: +toks[0], len: +toks[1], type: toks[2], op: toks[3], value: toks[4] };
+        if (toks.length === 4 && info.format && /^\d+$/.test(toks[0]) && TYPE.test(toks[1]) && OPR.test(toks[2]) && VAL(toks[3]))
+          return { pos: +toks[0], len: null, type: toks[1], op: toks[2], value: toks[3] };
+        if (toks.length === 6 && toks.every((t, i) => (i === 2 ? TYPE.test(t) : i === 3 ? OPR.test(t) : /^\d+$/.test(t))))
+          return { pos: +toks[0], len: +toks[1], type: toks[2], op: toks[3], value: toks[4] + ',' + toks[5], field2: true };
+        return null;
+      };
+      const walk = toks => {
+        const conds = [], joins = [];
+        let i = 0, expectCond = true;
+        while (i < toks.length){
+          const t = toks[i];
+          if (/^(AND|OR)$/.test(t)){
+            if (expectCond || !conds.length) return null;
+            joins.push(t); expectCond = true; i++; continue;
+          }
+          if (!expectCond) joins.push('AND'); // virgule implicite entre 2 sous-conditions
+          if (t.startsWith('(') && t.endsWith(')')){
+            const sub = walk(splitTop(unwrap(t)));
+            if (!sub) return null;
+            conds.push(...sub.conds); joins.push(...sub.joins);
+            expectCond = false; i++; continue;
+          }
+          let j = i; const rest = [];
+          while (j < toks.length && !/^(AND|OR)$/.test(toks[j]) && !toks[j].startsWith('(')){ rest.push(toks[j]); j++; }
+          if (j === i) return null;
+          const c = parseCond(rest);
+          if (!c) return null;
+          conds.push(c); expectCond = false; i = j;
+        }
+        return expectCond ? null : { conds, joins };
+      };
+      const res = walk(splitTop(unwrap(blk.raw)));
+      if (res && res.conds.length){ blk.conds = res.conds; blk.joins = res.joins; blk.decoded = true; }
+      continue;
+    }
+    // INREC/OUTREC BUILD/OVERLAY/FIELDS : ré-assemblage des paires (pos,len)
+    // et (out:pos,len) / (out:litéral) — le reste reste brut, jamais inventé.
+    const ir = card.match(/^(INREC|OUTREC)\s+(BUILD|OVERLAY|FIELDS)\s*=\s*\(?(.+?)\)?\s*$/);
+    if (ir){
+      const blk = { kind: ir[2], raw: ir[3], items: [], decoded: false };
+      const toks = ir[3].split(',').map(x => x.trim()).filter(Boolean);
+      let ok = toks.length > 0;
+      let i = 0;
+      while (ok && i < toks.length){
+        const t = toks[i];
+        const m2 = t.match(/^(\d+):(\d+)$/);
+        if (m2 && i + 1 < toks.length && /^\d+$/.test(toks[i+1])){ blk.items.push({ out: +m2[1], pos: +m2[2], len: +toks[i+1] }); i += 2; }
+        else if (/^\d+$/.test(t) && i + 1 < toks.length && /^\d+$/.test(toks[i+1])){ blk.items.push({ out: null, pos: +t, len: +toks[i+1] }); i += 2; }
+        else { const m3 = t.match(/^(\d+):C'(.*)'$/); if (m3){ blk.items.push({ out: +m3[1], literal: m3[2] }); i += 1; } else { ok = false; blk.items = []; } }
+      }
+      blk.decoded = ok && blk.items.length > 0;
+      info[ir[1] === 'INREC' ? 'inrec' : 'outrec'] = blk;
+      continue;
+    }
+    // OUTFIL FNAMES/OUTDD : sorties supplémentaires du tri — les DD nommés
+    // deviennent des sorties connues du step (usage réel, plus « unknown »).
+    if (/^OUTFIL\b/.test(card)){
+      const blk = { raw: card, names: [], decoded: false };
+      const fn = card.match(/FNAMES?\s*=\s*\(([^)]+)\)/) || card.match(/FNAMES?\s*=\s*([A-Z0-9\-@#$.]+)/);
+      const od = card.match(/OUTDD\s*=\s*\(([^)]+)\)/) || card.match(/OUTDD\s*=\s*([A-Z0-9\-@#$.]+)/);
+      (fn ? fn[1].split(',') : []).forEach(x => { if (x.trim()) blk.names.push(x.trim()); });
+      (od ? od[1].split(',') : []).forEach(x => { if (x.trim()) blk.names.push(x.trim()); });
+      blk.decoded = blk.names.length > 0;
+      (info.outfil = info.outfil || []).push(blk);
+      continue;
+    }
+    // OPTION COPY : tri contourné, copie pure — décodé. Autres paramètres OPTION
+    // (EQUALS, DYNALLOC, etc.) : reconnus, non décodés (documenté).
+    if (/^OPTION\b/.test(card)){
+      if (/\bCOPY\b/.test(card)){ info.type = 'copy'; info.decoded = true; info.optionCopy = true; }
+      continue;
+    }
+    // RECORD/MODS/DEBUG/END : reconnues, non décodées (documenté)
+    if (/^(RECORD|MODS|DEBUG|END)\b/.test(card)) continue;
   }
   return info;
+}
+
+// ── Scheduler : export d'ordonnancement (format documenté, jamais deviné) ──
+// Format accepté (une déclaration par ligne, insensible à la casse) :
+//   JOB <JOBNAME> AFTER <JOB1>,<JOB2>,…      (# ou * = commentaire)
+// Le scheduler EST la source de l'ordre d'exécution : une dépendance déclarée
+// rend l'ordre CERTAIN. Lignes inconnues, noms invalides, auto-dépendances et
+// cycles → warnings explicites — aucune inférence, jamais masqué.
+function parseSched(text){
+  const S = { deps: [], warnings: [] };
+  const seen = new Map();
+  (text || '').split(/\r?\n/).forEach((raw, i) => {
+    const l = raw.trim();
+    if (!l || l.startsWith('#') || l.startsWith('*')) return;
+    const m = l.match(/^JOB\s+([A-Z0-9@#$.\-]{1,8})\s+AFTER\s+(.+)$/i);
+    if (!m){ S.warnings.push('line ' + (i + 1) + ': not a "JOB … AFTER …" declaration — ignored, kept raw'); return; }
+    const job = m[1].toUpperCase();
+    const parts = m[2].split(',').map(x => x.trim().toUpperCase());
+    const afters = parts.filter(x => /^[A-Z0-9@#$.\-]{1,8}$/.test(x));
+    parts.filter(x => x && !/^[A-Z0-9@#$.\-]{1,8}$/.test(x))
+      .forEach(x => S.warnings.push('line ' + (i + 1) + ': predecessor "' + x + '" is not a valid job name — ignored'));
+    const rec = seen.get(job) || { job, after: [] };
+    afters.forEach(a => {
+      if (a === job){ S.warnings.push('job ' + job + ': declared AFTER itself — ignored (self-cycle)'); return; }
+      if (!rec.after.includes(a)) rec.after.push(a);
+    });
+    seen.set(job, rec);
+  });
+  S.deps = [...seen.values()];
+  S.deps.forEach(d => d.after.forEach(a => {
+    const r = seen.get(a);
+    if (r && r.after.includes(d.job)) S.warnings.push('cycle: ' + d.job + ' AFTER ' + a + ' and ' + a + ' AFTER ' + d.job + ' — order undefined, both edges kept as declared');
+  }));
+  return S;
 }
 
 // ── REXX : analyse minimale honnête — CALL littéral, CALL via variable, datasets cités ──
@@ -559,6 +746,8 @@ function parseJCL(text, members){
           // PROC imbriqués in-stream : pile de définitions, PEND restaure le parent
           procStack.push(procDef);
           procDef = { name: st.name.toUpperCase(), defaults: parseParams(st.operands), steps: [] };
+          if (result.procs[procDef.name])
+            warnings.push(`L${st.line}: PROC ${procDef.name} redefined (ambiguous definition) — the later definition wins for EXEC resolution, the earlier one is ignored`);
           result.procs[procDef.name] = procDef;
         } else if (job) {
           // PROC sans nom (JOB statement) : defaults symboliques pour ce job
@@ -640,6 +829,15 @@ function parseJCL(text, members){
       const sysin = dds.find(d => d.ddname === 'SYSIN');
       if (sysin && sysin.inline && sysin.inline.length){
         st.sortInfo = parseSortCards(sysin.inline.map(l => l.text).join('\n'));
+        // OUTFIL FNAMES/OUTDD : ces DD sont des sorties RÉELLES du tri —
+        // usage établi même sans DISP, jamais laissé « unknown ».
+        ((st.sortInfo.outfil || []).flatMap(x => x.names || [])).forEach(nm => {
+          const dd = dds.find(d => d.ddname === nm);
+          if (dd && dd.usage !== 'input'){
+            if (dd.usage === 'unknown') dd.usage = 'output';
+            dd.outfil = true;
+          }
+        });
         if (st.sortInfo.type === 'sort' && !st.sortInfo.decoded)
           warnings.push(`L${st.line}: SORT step ${st.name}: cards present but fields not decoded (unusual form) — shown as undecoded`);
       } else if (sysin && sysin.name){
@@ -676,7 +874,12 @@ function parseJCL(text, members){
 // Idempotent : appelé à chaque buildGraph, ne fait rien une fois tout résolu.
 function linkCatalogedProcs(){
   const registry = {};
-  state.files.forEach(f=>{ if (f.lang === 'JCL' && f.parsed.procs) Object.assign(registry, f.parsed.procs); });
+  state.files.forEach(f=>{ if (f.lang === 'JCL' && f.parsed.procs) Object.keys(f.parsed.procs).forEach(pn=>{
+    // même nom de PROC dans plusieurs fichiers : le dernier gagne (Object.assign historique) — signalé, jamais silencieux
+    if (registry[pn] && !(f.parsed.warnings||[]).some(w => w.includes(`PROC ${pn} defined in multiple files`)))
+      (f.parsed.warnings = f.parsed.warnings || []).push(`PROC ${pn} defined in multiple files (ambiguous definition) — the later file (${f.name}) wins for EXEC resolution`);
+    registry[pn] = f.parsed.procs[pn];
+  }); });
   let changed = true, guard = 0;
   while (changed && guard < 25){
     changed = false; guard++;
@@ -765,7 +968,8 @@ function cobLogicalItems(text, warns){
   // détection UNE fois pour tout le fichier : en format libre, une entrée
   // indentée "    05  X PIC 9." ne doit pas être confondue avec une zone de
   // séquence fixe — sinon le niveau de données serait avalé.
-  const fixed = cobDetectFixed(text);
+  const fixed0 = cobDetectFixed(text);
+  let fixed = fixed0; // >>SOURCE FORMAT peut changer le format en cours de fichier (mixte réel)
   const items = [];
   let inSql = false, sqlBuf = [], sqlStart = 0;
   let inCics = false, cicsBuf = [], cicsStart = 0;
@@ -773,6 +977,14 @@ function cobLogicalItems(text, warns){
   for (let i = 0; i < lines.length; i++){
     const orig = lines[i];
     let l = orig;
+    // directives COBOL 2002 : >>SOURCE FORMAT IS FREE/FIXED bascule le format,
+    // les autres >> (DEFINE, IF…) n'ont pas d'effet d'analyse — ignorées
+    const otrim = orig.trim();
+    if (otrim.startsWith('>>')){
+      const fm = otrim.match(/^>>\s*SOURCE\b.*?\b(FREE|FIXED)\b/i);
+      if (fm) fixed = fm[1].toUpperCase() === 'FIXED';
+      continue;
+    }
     let ind = '';
     if (fixed){
       // format fixe : zone de séquence (col 1-6) + indicatif (col 7), troncature à 72
@@ -782,15 +994,25 @@ function cobLogicalItems(text, warns){
       else l = l.slice(7);
       if (l.length > 72) l = l.slice(0, 72);
       if (orig.length > 72 && warns) warns.push(`line ${i+1}: statement beyond column 72 truncated (fixed format)`);
-    } else if (l.length > 80){
-      if (warns) warns.push(`line ${i+1}: very long line — free format assumed, not truncated`);
+    } else {
+      // fichier libre « mixte » : une ligne séquencée isolée (6 chiffres + espace) reste du fixe
+      if (/^[0-9]{6}\s+\S/.test(l)) l = l.slice(7);
+      if (l.length > 80){
+        if (warns) warns.push(`line ${i+1}: very long line — free format assumed, not truncated`);
+      }
     }
+    // directives de listing/compilateur : EJECT, SKIP1-3, TITLE, CBL/*CBL — pas du code
+    const ltrim = l.trim();
+    if (/^(EJECT|SKIP[123])(\.|\s*$)/i.test(ltrim) || /^(TITLE|CBL)\b/i.test(ltrim)) continue;
+    // format libre : * ou / en début de ligne (colonne 1) = commentaire/page-eject
+    if (!fixed && /^\s*[*/]/.test(l)) continue;
     // commentaire flottant *> (COBOL 2002+) — supprimé hors littérale
+    // (guillemet simple OU double : les deux formes existent en 2002)
     {
       let q = false;
       for (let ci = 0; ci < l.length - 1; ci++){
         const ch = l[ci];
-        if (ch === "'") q = !q;
+        if (ch === "'" || ch === '"') q = !q;
         else if (!q && ch === '*' && l[ci+1] === '>'){ l = l.slice(0, ci).trim(); break; }
       }
     }
@@ -874,13 +1096,15 @@ function cobSentences(items){
 
 function parseReplacing(s){
   // COPY X REPLACING ==A== BY ==B==  |  A BY B  |  LEADING/TRAILING ==A== BY ==B==
+  // Pseudo-text (==...==) : correspondance TEXTOUELLE, y compris multi-mots et
+  // caractères non mots (:PREFIX:, -REC...). Mot simple : délimité par \b.
   const pairs = [];
   const re = /(LEADING|TRAILING)?\s*(?:==([^=]+)==|\b([A-Z0-9][A-Z0-9\-]*)\b)\s+BY\s+(?:==([^=]+)==|\b([A-Z0-9][A-Z0-9\-]*)\b)/gi;
   let m;
   while ((m = re.exec(s))){
     const from = (m[2] !== undefined ? m[2] : (m[3] || '')).toUpperCase().trim();
     const to = (m[4] !== undefined ? m[4] : (m[5] || '')).toUpperCase().trim();
-    if (from) pairs.push({ from, to, mode: (m[1] || '').toUpperCase() });
+    if (from) pairs.push({ from, to, mode: (m[1] || '').toUpperCase(), pt: m[2] !== undefined });
   }
   return pairs;
 }
@@ -888,9 +1112,10 @@ function applyReplacing(t, pairs){
   for (const p of pairs){
     const a = p.from.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
     try {
-      if (p.mode === 'LEADING') t = t.replace(new RegExp('\\b' + a, 'gi'), p.to);
-      else if (p.mode === 'TRAILING') t = t.replace(new RegExp(a + '\\b', 'gi'), p.to);
-      else t = t.replace(new RegExp('\\b' + a + '\\b', 'gi'), p.to);
+      // remplacement par fonction : le texte de remplacement ($, &…) est inséré tel quel
+      if (p.mode === 'LEADING') t = t.replace(new RegExp(p.pt ? a : '\\b' + a, 'gi'), () => p.to);
+      else if (p.mode === 'TRAILING') t = t.replace(new RegExp(p.pt ? a : a + '\\b', 'gi'), () => p.to);
+      else t = t.replace(new RegExp(p.pt ? a : '\\b' + a + '\\b', 'gi'), () => p.to);
     } catch(e){ /* pattern invalide → texte original conservé */ }
   }
   return t;
@@ -929,38 +1154,61 @@ function expandCopies(sents, registry, ctx, stack){
   return out;
 }
 
-const SQLKW = new Set(['SELECT','INSERT','UPDATE','DELETE','FROM','WHERE','SET','INTO','VALUES','JOIN','INNER','LEFT','RIGHT','OUTER','ON','AND','OR','NOT','IN','BETWEEN','LIKE','ORDER','GROUP','BY','AS','DISTINCT','UNION','ALL','CURSOR','FOR','FETCH','DECLARE','OPEN','CLOSE','WITH','HAVING','EXISTS','CASE','WHEN','THEN','END','TABLE','CREATE','DROP','ALTER','INDEX','VIEW','COUNT','SUM','AVG','MIN','MAX','CURRENT','TIMESTAMP','DATE','SCHEMA','COMMIT','ROLLBACK','WHENEVER','NOT','FOUND','SQLSTATE','SQLCODE','WITH','HOLD','SQLEXCEPTION','SQLWARNING']);
+const SQLKW = new Set(['SELECT','INSERT','UPDATE','DELETE','FROM','WHERE','SET','INTO','VALUES','JOIN','INNER','LEFT','RIGHT','OUTER','ON','AND','OR','NOT','IN','BETWEEN','LIKE','ORDER','GROUP','BY','AS','DISTINCT','UNION','ALL','CURSOR','FOR','FETCH','DECLARE','OPEN','CLOSE','WITH','HAVING','EXISTS','CASE','WHEN','THEN','END','TABLE','CREATE','DROP','ALTER','INDEX','VIEW','COUNT','SUM','AVG','MIN','MAX','CURRENT','TIMESTAMP','DATE','SCHEMA','COMMIT','ROLLBACK','WHENEVER','NOT','FOUND','SQLSTATE','SQLCODE','WITH','HOLD','SQLEXCEPTION','SQLWARNING','DESCRIPTOR','MERGE','TRUNCATE','ONLY','ROW','ROWS']);
 
 function sqlTables(st){
   // st = texte d'un bloc EXEC SQL (sans le préfixe) → tables référencées
+  // Faux positifs exclus : alias (seul le premier nom est retenu), CTE (avec
+  // liste de colonnes ou récursives), sous-requêtes "(SELECT…", variables
+  // hôtes, fonctions de table. Identifiants quotés supportés, qualifiés inclus.
   const text = st.replace(/^\s*EXEC\s+SQL/i,'').replace(/\bEND-EXEC\b\.?\s*$/i,'');
   const upper = text.toUpperCase();
   const tabs = new Set();
-  // noms de CTE (WITH X AS (...)) : ce ne sont pas des tables — exclus des résultats
+  // noms de CTE (WITH X AS (…) / WITH X (A,B) AS (…) / WITH RECURSIVE R AS (…)) :
+  // ce ne sont pas des tables — exclus des résultats
   const ctes = new Set();
-  const cteRe = /(?:\bWITH\b|,)\s*([A-Z0-9\-]+)\s+AS\s*\(/g;
+  const cteRe = /(?:\bWITH\b(?:\s+RECURSIVE)?|,)\s*([A-Z0-9\-]+)\s*(?:\([^)]*\))?\s*AS\s*\(/g;
   let cm2;
   while ((cm2 = cteRe.exec(upper))) ctes.add(cm2[1]);
+  // un identifiant : quoté "MY TABLE" ou simple ; un nom : 1 à 4 identifiants séparés par des points
+  const qid = (s) => {
+    if (s.startsWith('"')){ const e = s.indexOf('"', 1); return e < 1 ? null : { id: s.slice(1, e), rest: s.slice(e + 1) }; }
+    const mm = s.match(/^([A-Z0-9\-@#$_]+)/); return mm ? { id: mm[1], rest: s.slice(mm[1].length) } : null;
+  };
+  const parseName = (s) => {
+    let name = '', rest = s.trim();
+    for (let i = 0; i < 4; i++){
+      const p = qid(rest);
+      if (!p) break;
+      name = name ? name + '.' + p.id : p.id;
+      rest = p.rest.trim();
+      if (rest.charAt(0) === '.'){ rest = rest.slice(1).trim(); continue; }
+      break;
+    }
+    return { name, rest };
+  };
   const pushList = (s) => {
     s.split(',').forEach(x => {
       const t = x.trim();
       if (!t) return;
-      const q = t.match(/^"([^"]+)"/); // identifiant entre guillemets ("MY TABLE")
-      if (q){ tabs.add(q[1].trim().toUpperCase()); return; }
-      const w = t.split(/\s+/)[0];
-      const clean = w.replace(/[(),;]/g,'');
-      if (clean && !SQLKW.has(clean) && !ctes.has(clean) && !clean.startsWith(':') && !/^&/.test(clean)) tabs.add(clean);
+      const { name } = parseName(t);
+      if (!name) return; // "(SELECT…" (sous-requête), ":host-var"…
+      const last = name.split('.').pop();
+      // rejet par le DERNIER segment : SCHEMA.T1 est une table, mais FROM seul
+      // (TABLE(X), DESCRIPTOR…) ou un nom de CTE ne le sont jamais
+      if (SQLKW.has(last) || ctes.has(last) || ctes.has(name)) return;
+      if (name.startsWith(':') || name.startsWith('&')) return;
+      tabs.add(name);
     });
   };
-  // FROM t1, t2 alias / JOIN t / INTO t / UPDATE t
-  const anchors = ['FROM','INTO','UPDATE','JOIN','TABLE'];
-  const re = /\b(FROM|INTO|UPDATE|JOIN|TABLE)\b/g;
+  // FROM t1, t2 alias / JOIN t / INTO t / UPDATE t / USING t (MERGE) / TABLE t (TRUNCATE, CREATE)
+  const re = /\b(FROM|INTO|UPDATE|JOIN|TABLE|USING)\b/g;
   let m;
   while ((m = re.exec(upper))){
     const after = upper.slice(m.index + m[0].length).trim();
     // s'arrêter au premier keyword SQL suivant
     let seg = after;
-    const kwRe = /\b(SELECT|WHERE|SET|ON|JOIN|INNER|LEFT|RIGHT|OUTER|VALUES|FOR|WITH|AS|END-EXEC)\b/;
+    const kwRe = /\b(SELECT|FROM|WHERE|SET|ON|USING|JOIN|INNER|LEFT|RIGHT|OUTER|VALUES|FOR|WITH|AS|END-EXEC)\b/;
     const km = seg.match(kwRe);
     if (km) seg = seg.slice(0, km.index);
     pushList(seg);
@@ -992,10 +1240,10 @@ function sqlParse(C, s){
       return;
     }
     op = cm[1];
-  } else if (['SELECT','INSERT','UPDATE','DELETE','MERGE'].includes(first)) op = first;
-  // normalisation des opérations : SELECT→read, INSERT/DELETE→write, UPDATE/MERGE→update
+  } else if (['SELECT','INSERT','UPDATE','DELETE','MERGE','TRUNCATE'].includes(first)) op = first;
+  // normalisation des opérations : SELECT→read, INSERT/DELETE/TRUNCATE→write, UPDATE/MERGE→update
   if (op === 'SELECT') op = 'read';
-  else if (op === 'INSERT' || op === 'DELETE') op = 'write';
+  else if (op === 'INSERT' || op === 'DELETE' || op === 'TRUNCATE') op = 'write';
   else if (op === 'UPDATE' || op === 'MERGE') op = 'update';
   if (op === null && /\bSELECT\b/.test(U)) op = 'read';
   const tabs = sqlTables(s.text);
@@ -1053,6 +1301,731 @@ function cicsParse(C, s, para){
 }
 
 const IDENT = /^[A-Z0-9][A-Z0-9\-]*$/;
+// mots-clés qui ne peuvent PAS être des noms de paragraphes (partagé moteur + traducteur)
+const PARAGRAPH_KW = /^(SECTION|DIVISION|END|DECLARATIVES|EXIT|STOP|GO|PERFORM|MOVE|IF|ELSE|CALL|READ|WRITE|OPEN|CLOSE|DISPLAY|COMPUTE|ADD|SUBTRACT|MULTIPLY|DIVIDE|SET|INITIALIZE|ACCEPT|EVALUATE|END-EVALUATE|WHEN|END-IF|UNTIL|VARYING|CONTINUE|RETURN)$/;
+
+// ══════════════════ 1c. TRADUCTION COBOL → PYTHON (déterministe) ══════════════════
+// Deux moteurs DISTINCTS (Priorité 2) :
+//  • MOTEUR DÉTERMINISTE (celui-ci) : chaque instruction reconnue est traduite par
+//    des règles fixes — jamais par devinette. Chaque instruction porte un statut
+//    (translated / approximated / unsupported), sa ligne COBOL d'origine et sa
+//    ligne Python, visibles dans le rapport de traduction.
+//  • MOTEUR IA (optionnel, ultérieur) : toute proposition IA devrait être VALIDÉE
+//    par ce moteur (structure + statuts) et étiquetée « AI-proposed » — jamais
+//    mélangée à la traduction déterministe. Aucune sortie IA simulée.
+// Doctrine : ce qui n'est pas traduit est affiché comme tel (commentaire
+// [NON TRADUIT] + statut unsupported). Aucun code Python n'est inventé.
+
+const PY_CONF = { move: .95, compute: .9, arith: .9, if: .9, evaluate: .85, perform: .85, goto: .7, display: .95, initialize: .9, stop: .95, call: .9, set88: .85, nop: 1, sql: 0, cics: 0, io: 0, unknown: 0 };
+
+function pyIdent(name){
+  let s = String(name || 'x').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!s || /^[0-9]/.test(s)) s = 'p_' + s;
+  return s;
+}
+function pyQuote(s){ return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'; }
+
+// PIC → type Python. Mapping documenté, approximation assumée :
+//  X/A → str, 9 → int, V → float (les décimales servent au ROUNDED),
+//  S → signé (natif en Python), COMP/COMP-3/BINARY → stockage noté.
+function pyPicType(v){
+  const p = String(v.pic || '').toUpperCase();
+  const digitsOf = (seg) => { let n = 0, mm; const re = /9(?:\((\d+)\))?/g; while ((mm = re.exec(seg))) n += mm[1] ? parseInt(mm[1], 10) : 1; return n; };
+  if (!p) return null;
+  if (/^[AX]/.test(p)){
+    const d = digitsOf(p.replace(/[AX]/g, '9')) || 1;
+    return { kind: 'str', len: d, decs: 0,
+      note: 'PIC ' + p + ' → str' + (d > 1 ? ' (longueur ' + d + ' non contrainte en Python)' : '') + (v.usage ? ' [' + v.usage + ']' : '') };
+  }
+  const signed = /^S/.test(p);
+  const body = p.replace(/^S/, '');
+  const parts = body.split('V');
+  const decs = digitsOf(parts[1] || '');
+  const kind = decs > 0 ? 'float' : 'int';
+  return { kind, decs, signed,
+    note: 'PIC ' + p + ' → ' + kind + (decs > 0 ? ' (' + decs + ' décimales — approximation float, à valider pour des montants)' : '') + (signed ? ' (signé)' : '') + (v.usage ? ' [' + v.usage + ']' : '') };
+}
+
+// ── tokeniseur dédié à la traduction (littérales préservées) ──
+function trToks(t){
+  const s = String(t).trim();
+  const out = [];
+  let i = 0;
+  while (i < s.length){
+    const ch = s[i];
+    if (/\s/.test(ch)) { i++; continue; }
+    if (ch === "'" || ch === '"'){
+      let j = i + 1;
+      while (j < s.length && s[j] !== ch) j++;
+      out.push({ t: 'lit', v: s.slice(i + 1, j) });
+      i = j + 1;
+      continue;
+    }
+    if ('(),+-*/=<>:'.includes(ch)){ out.push({ t: 'op', v: ch }); i++; continue; }
+    let m = s.slice(i).match(/^[A-Za-z][A-Za-z0-9\-]*/);
+    if (m){ out.push({ t: 'w', v: m[0] }); i += m[0].length; continue; }
+    m = s.slice(i).match(/^\d+(?:\.\d+)?/);
+    if (m){ out.push({ t: 'num', v: m[0] }); i += m[0].length; continue; }
+    i++;
+  }
+  return out;
+}
+function trNormalize(toks){
+  // fusion des paires END+IF → END-IF, GO+TO → GOTO (mots composés)
+  const out = [];
+  for (let k = 0; k < toks.length; k++){
+    const a = toks[k], b = toks[k + 1];
+    if (a && b && a.t === 'w' && b.t === 'w'){
+      const A = a.v.toUpperCase(), B = b.v.toUpperCase();
+      if ((A === 'END' && ['IF', 'EVALUATE', 'PERFORM', 'SEARCH', 'PROGRAM'].includes(B)) || (A === 'GO' && B === 'TO')){
+        out.push({ t: 'w', v: A === 'GO' ? 'GOTO' : A + '-' + B });
+        k++;
+        continue;
+      }
+    }
+    out.push(a);
+  }
+  return out;
+}
+
+const TR_VERBS = new Set(['MOVE','COMPUTE','ADD','SUBTRACT','MULTIPLY','DIVIDE','IF','EVALUATE','PERFORM','GOTO','DISPLAY','INITIALIZE','STOP','CALL','READ','WRITE','REWRITE','DELETE','OPEN','CLOSE','EXIT','CONTINUE','SET','ACCEPT','EXEC','STRING','UNSTRING','SEARCH','SORT','MERGE','RETURN','ALTER','GOBACK','NEXT']);
+const TR_BLOCKS = new Set(['ELSE','END-IF','WHEN','END-EVALUATE','END-PERFORM','OTHER']);
+const TR_KWS = new Set(['TO','FROM','BY','INTO','GIVING','UNTIL','THRU','THROUGH','TIMES','VARYING','ROUNDED','ON','SIZE','ERROR','REMAINDER','SENTENCE','WITH','TEST','BEFORE','AFTER','UPON','ALSO','RUN','TRUE','FALSE','OTHER','ELSE','END-IF','END-EVALUATE','END-PERFORM','DEPENDING']);
+
+const PY_FIG = { SPACE: '" "', SPACES: '" "', ZERO: '0', ZEROS: '0', ZEROES: '0', NULL: 'None', LOWVALUE: '"\\x00"', LOWVALUES: '"\\x00"', HIGHVALUE: '"\\xff"', HIGHVALUES: '"\\xff"', QUOTE: '"\\x27"' };
+function trVal(tok){
+  if (!tok) return 'None';
+  if (tok.t === 'lit') return pyQuote(tok.v);
+  if (tok.t === 'num') return tok.v;
+  if (tok.t === 'op') return tok.v;
+  const U = tok.v.toUpperCase();
+  if (PY_FIG[U] !== undefined) return PY_FIG[U];
+  return pyIdent(tok.v);
+}
+const trIsWord = (tok, u) => !!tok && tok.t === 'w' && tok.v.toUpperCase() === u;
+
+function trCond(toks, i, endStops){
+  // lit une condition (comparaisons symboliques et mots-clés incluses) jusqu'à un verbe
+  const parts = [];
+  while (i < toks.length){
+    const t = toks[i];
+    if (t.t === 'w'){
+      const U = t.v.toUpperCase();
+      if (U === 'NOT'){ parts.push(' not '); i++; continue; }
+      if (U === 'AND'){ parts.push(' and '); i++; continue; }
+      if (U === 'OR'){ parts.push(' or '); i++; continue; }
+      if (U === 'GREATER'){ i++; if (trIsWord(toks[i], 'THAN')) i++; if (trIsWord(toks[i], 'OR') && trIsWord(toks[i+1], 'EQUAL')){ parts.push(' >= '); i += 2; if (trIsWord(toks[i], 'TO')) i++; } else parts.push(' > '); continue; }
+      if (U === 'LESS'){ i++; if (trIsWord(toks[i], 'THAN')) i++; if (trIsWord(toks[i], 'OR') && trIsWord(toks[i+1], 'EQUAL')){ parts.push(' <= '); i += 2; if (trIsWord(toks[i], 'TO')) i++; } else parts.push(' < '); continue; }
+      if (U === 'EQUAL'){ parts.push(' == '); i++; if (trIsWord(toks[i], 'TO')) i++; continue; }
+      if (U === 'UNEQUAL'){ parts.push(' != '); i++; continue; }
+      if (endStops.has(U) || TR_VERBS.has(U)) break;
+      parts.push(pyIdent(t.v)); i++; continue;
+    }
+    if (t.t === 'op'){
+      if (t.v === '=') parts.push(' == ');
+      else if (t.v === '>' && toks[i+1] && toks[i+1].t === 'op' && toks[i+1].v === '='){ parts.push(' >= '); i++; }
+      else if (t.v === '<' && toks[i+1] && toks[i+1].t === 'op' && toks[i+1].v === '='){ parts.push(' <= '); i++; }
+      else parts.push(' ' + t.v + ' ');
+      i++;
+      continue;
+    }
+    parts.push(trVal(t)); i++;
+  }
+  return { py: parts.join('').replace(/\s+/g, ' ').trim(), i };
+}
+
+function trIdents(toks, i){
+  const ids = [];
+  while (i < toks.length){
+    const t = toks[i];
+    if (t.t === ',' ){ i++; continue; }
+    if (t.t === 'w' && !TR_VERBS.has(t.v.toUpperCase()) && !TR_KWS.has(t.v.toUpperCase()) && !TR_BLOCKS.has(t.v.toUpperCase())){ ids.push(t.v); i++; continue; }
+    break;
+  }
+  return { ids, i };
+}
+
+function trStmts(toks, i, stops){
+  const stmts = [];
+  while (i < toks.length){
+    const t = toks[i];
+    if (t.t === ','){ i++; continue; }
+    if (t.t === 'w' && stops.has(t.v.toUpperCase())) break;
+    if (t.t === 'w' && TR_BLOCKS.has(t.v.toUpperCase()) && !stops.has(t.v.toUpperCase())) break;
+    const r = trStmt(toks, i, stops);
+    if (!r) break;
+    stmts.push(r.stmt);
+    i = r.i;
+  }
+  return { stmts, i };
+}
+
+function trStmt(toks, i, stops){
+  const t = toks[i];
+  if (!t || t.t !== 'w') return null;
+  const U = t.v.toUpperCase();
+  const stopAll = (extra) => { const s = new Set(stops); (extra || []).forEach(x => s.add(x)); return s; };
+  switch (U){
+    case 'MOVE': {
+      i++;
+      const srcs = [];
+      while (i < toks.length && !trIsWord(toks[i], 'TO')){
+        if (toks[i].t === ','){ i++; continue; }
+        if (toks[i].t === 'w' && (TR_VERBS.has(toks[i].v.toUpperCase()) || stops.has(toks[i].v.toUpperCase()))) break;
+        srcs.push(toks[i]); i++;
+      }
+      if (!srcs.length || !trIsWord(toks[i], 'TO')) return { stmt: { k: 'unknown', verb: 'MOVE' }, i: toks.length };
+      i++;
+      const d = trIdents(toks, i); i = d.i;
+      return { stmt: { k: 'move', src: srcs[srcs.length - 1], srcsN: srcs.length, dsts: d.ids }, i };
+    }
+    case 'COMPUTE': {
+      i++;
+      const dstTok = toks[i] || null; i++;
+      let rounded = false;
+      if (trIsWord(toks[i], 'ROUNDED')){ rounded = true; i++; }
+      if (toks[i] && toks[i].t === 'op' && toks[i].v === '=') i++;
+      const expr = [];
+      while (i < toks.length && !(toks[i].t === 'w' && (TR_VERBS.has(toks[i].v.toUpperCase()) || stops.has(toks[i].v.toUpperCase()) || TR_BLOCKS.has(toks[i].v.toUpperCase())))){
+        expr.push(toks[i]); i++;
+      }
+      return { stmt: { k: 'compute', dst: dstTok ? dstTok.v : null, rounded, expr }, i };
+    }
+    case 'ADD': case 'SUBTRACT': case 'MULTIPLY': case 'DIVIDE': {
+      const op = U;
+      i++;
+      const operands = [];
+      while (i < toks.length){
+        const w = toks[i];
+        const W = w.t === 'w' ? w.v.toUpperCase() : null;
+        if (W === 'TO' || W === 'FROM' || W === 'BY' || W === 'INTO' || W === 'GIVING') break;
+        if (w.t === ','){ i++; continue; }
+        if (w.t === 'w' && TR_VERBS.has(W)) break;
+        operands.push(w); i++;
+      }
+      let kind = null;
+      if (trIsWord(toks[i], 'TO')) kind = 'to';
+      else if (trIsWord(toks[i], 'FROM')) kind = 'from';
+      else if (trIsWord(toks[i], 'BY')) kind = 'by';
+      else if (trIsWord(toks[i], 'INTO')) kind = 'into';
+      if (kind) i++;
+      const tg = trIdents(toks, i); i = tg.i;
+      let giving = null, rounded = false;
+      if (trIsWord(toks[i], 'GIVING')){ i++; const g = trIdents(toks, i); giving = g.ids; i = g.i; }
+      if (trIsWord(toks[i], 'ROUNDED')){ rounded = true; i++; }
+      let onSize = false;
+      if (trIsWord(toks[i], 'ON') || trIsWord(toks[i], 'SIZE')){ onSize = true; i = toks.length; }
+      return { stmt: { k: op, operands, kind, targets: tg.ids, giving, rounded, onSize }, i };
+    }
+    case 'IF': {
+      i++;
+      const condStops = stopAll(['ELSE', 'END-IF']);
+      const c = trCond(toks, i, condStops);
+      i = c.i;
+      const then = trStmts(toks, i, stopAll(['ELSE', 'END-IF'])); i = then.i;
+      let orelse = null;
+      if (trIsWord(toks[i], 'ELSE')){
+        i++;
+        const el = trStmts(toks, i, stopAll(['END-IF']));
+        orelse = el.stmts; i = el.i;
+      }
+      if (trIsWord(toks[i], 'END-IF')) i++;
+      return { stmt: { k: 'if', cond: c.py, then: then.stmts, orelse }, i };
+    }
+    case 'EVALUATE': {
+      i++;
+      const subj = [];
+      while (i < toks.length && !trIsWord(toks[i], 'WHEN')){
+        if (toks[i].t === 'w' && TR_VERBS.has(toks[i].v.toUpperCase())) break;
+        subj.push(toks[i]); i++;
+      }
+      const whens = []; let other = null, alsoSeen = false;
+      while (trIsWord(toks[i], 'WHEN')){
+        i++;
+        if (trIsWord(toks[i], 'OTHER')){
+          i++;
+          const b = trStmts(toks, i, stopAll(['WHEN', 'END-EVALUATE']));
+          other = b.stmts; i = b.i;
+          break;
+        }
+        const val = [];
+        while (i < toks.length){
+          const w = toks[i];
+          if (w.t === 'w' && (TR_VERBS.has(w.v.toUpperCase()) || stops.has(w.v.toUpperCase()))) break;
+          if (w.t === 'w' && ['WHEN', 'END-EVALUATE', 'ALSO'].includes(w.v.toUpperCase())) break;
+          val.push(w); i++;
+        }
+        if (trIsWord(toks[i], 'ALSO')){ alsoSeen = true; i++; }
+        const b = trStmts(toks, i, stopAll(['WHEN', 'END-EVALUATE']));
+        whens.push({ val, body: b.stmts });
+        i = b.i;
+      }
+      if (trIsWord(toks[i], 'END-EVALUATE')) i++;
+      return { stmt: { k: 'EVALUATE', subject: subj, whens, other, alsoSeen }, i };
+    }
+    case 'PERFORM': {
+      i++;
+      const nt = toks[i];
+      if (nt && nt.t === 'num' && trIsWord(toks[i+1], 'TIMES')){
+        const n = nt.v; i += 2;
+        const b = trStmts(toks, i, stopAll(['END-PERFORM'])); i = b.i;
+        if (trIsWord(toks[i], 'END-PERFORM')) i++;
+        return { stmt: { k: 'PERFORM-INLINE', times: n, body: b.stmts }, i };
+      }
+      if (nt && (nt.t === 'num' || (nt.t === 'w' && !TR_VERBS.has(nt.v.toUpperCase()) && !TR_KWS.has(nt.v.toUpperCase())))){
+        const target = nt.v; i++;
+        let thru = null;
+        if (trIsWord(toks[i], 'THRU') || trIsWord(toks[i], 'THROUGH')){ i++; thru = toks[i] ? toks[i].v : null; i++; }
+        if (toks[i] && toks[i].t === 'num' && trIsWord(toks[i+1], 'TIMES')){ const n = toks[i].v; i += 2; return { stmt: { k: 'PERFORM', target, thru, times: n }, i }; }
+        if (trIsWord(toks[i], 'UNTIL')){
+          i++;
+          const c = trCond(toks, i, stopAll([])); i = c.i;
+          return { stmt: { k: 'PERFORM', target, thru, until: c.py }, i };
+        }
+        if (trIsWord(toks[i], 'VARYING')){
+          i++;
+          const v = toks[i] ? toks[i].v : null; i++;
+          let from = '1', by = '1', until = 'True';
+          if (trIsWord(toks[i], 'FROM')){ i++; from = trVal(toks[i]); i++; }
+          if (trIsWord(toks[i], 'BY')){ i++; by = trVal(toks[i]); i++; }
+          if (trIsWord(toks[i], 'UNTIL')){ i++; const c = trCond(toks, i, stopAll([])); until = c.py; i = c.i; }
+          return { stmt: { k: 'PERFORM', target, thru, varying: { v, from, by, until } }, i };
+        }
+        if (trIsWord(toks[i], 'TIMES')){ i++; const n = toks[i] ? toks[i].v : null; i++; return { stmt: { k: 'PERFORM', target, thru, times: n }, i }; }
+        return { stmt: { k: 'PERFORM', target, thru }, i };
+      }
+      let times = null, until = null, varying = null;
+      if (trIsWord(toks[i], 'UNTIL')){ i++; const c = trCond(toks, i, stopAll(['END-PERFORM'])); until = c.py; i = c.i; }
+      else if (trIsWord(toks[i], 'VARYING')){
+        i++;
+        const v = toks[i] ? toks[i].v : null; i++;
+        let from = '1', by = '1', u2 = 'True';
+        if (trIsWord(toks[i], 'FROM')){ i++; from = trVal(toks[i]); i++; }
+        if (trIsWord(toks[i], 'BY')){ i++; by = trVal(toks[i]); i++; }
+        if (trIsWord(toks[i], 'UNTIL')){ i++; const c = trCond(toks, i, stopAll(['END-PERFORM'])); u2 = c.py; i = c.i; }
+        varying = { v, from, by, until: u2 };
+      }
+      const b = trStmts(toks, i, stopAll(['END-PERFORM'])); i = b.i;
+      if (trIsWord(toks[i], 'END-PERFORM')) i++;
+      return { stmt: { k: 'PERFORM-INLINE', times, until, varying, body: b.stmts }, i };
+    }
+    case 'GOTO': {
+      i++;
+      const tgt = toks[i] ? toks[i].v : null; i++;
+      // GO TO ... DEPENDING ON (branchement dynamique multi-cibles) : non couvert
+      return { stmt: { k: 'GOTO', target: tgt }, i: toks.length };
+    }
+    case 'DISPLAY': {
+      i++;
+      const items = [];
+      while (i < toks.length){
+        const w = toks[i];
+        if (w.t === ','){ i++; continue; }
+        if (w.t === 'w' && (TR_VERBS.has(w.v.toUpperCase()) || stops.has(w.v.toUpperCase()))) break;
+        if (trIsWord(w, 'UPON')){ break; }
+        items.push(w); i++;
+      }
+      return { stmt: { k: 'DISPLAY', items }, i };
+    }
+    case 'INITIALIZE': {
+      i++;
+      const d = trIdents(toks, i); i = d.i;
+      return { stmt: { k: 'INITIALIZE', targets: d.ids }, i };
+    }
+    case 'STOP': { i++; if (trIsWord(toks[i], 'RUN')) i++; return { stmt: { k: 'STOP' }, i: toks.length }; }
+    case 'GOBACK': { return { stmt: { k: 'STOP', via: 'GOBACK' }, i: toks.length }; }
+    case 'EXIT': { i++; if (trIsWord(toks[i], 'PROGRAM')) i++; return { stmt: { k: 'NOP', note: 'EXIT' }, i }; }
+    case 'CONTINUE': { return { stmt: { k: 'NOP' }, i: i + 1 }; }
+    case 'SET': {
+      i++;
+      const d = trIdents(toks, i); i = d.i;
+      if (trIsWord(toks[i], 'TO')) i++;
+      if (trIsWord(toks[i], 'TRUE')){ i++; return { stmt: { k: 'SET88', targets: d.ids }, i: toks.length }; }
+      return { stmt: { k: 'SET', targets: d.ids }, i: toks.length };
+    }
+    case 'CALL': {
+      i++;
+      const tok = toks[i] || null; i++;
+      return { stmt: { k: 'CALL', lit: tok && tok.t === 'lit' ? tok.v : null, viaVar: tok && tok.t === 'w' ? tok.v : null }, i: toks.length };
+    }
+    case 'READ': case 'WRITE': case 'REWRITE': case 'OPEN': case 'CLOSE': case 'DELETE': {
+      i++;
+      let txt = U;
+      while (i < toks.length && !(toks[i].t === 'w' && (TR_VERBS.has(toks[i].v.toUpperCase()) || stops.has(toks[i].v.toUpperCase()) || TR_BLOCKS.has(toks[i].v.toUpperCase())))){
+        txt += ' ' + (toks[i].t === 'lit' ? "'" + toks[i].v + "'" : toks[i].v);
+        i++;
+      }
+      return { stmt: { k: 'IO', verb: U, text: txt }, i };
+    }
+    default:
+      return { stmt: { k: 'unknown', verb: U }, i: i + 1 };
+  }
+}
+
+// feuilles (avec PIC) d'un groupe de données — pour INITIALIZE honnête
+function trGroupLeaves(varList, name){
+  const idx = varList.findIndex(v => String(v.name).toUpperCase() === String(name).toUpperCase());
+  if (idx < 0) return [];
+  const lvl = varList[idx].level;
+  const out = [];
+  for (let k = idx + 1; k < varList.length && varList[k].level > lvl; k++){
+    if (varList[k].pic && !varList[k].is88) out.push(varList[k]);
+  }
+  return out;
+}
+
+function trEmitStmt(out, st, ind, ctx){
+  const py = (s) => { out.lines.push(ind + s); return out.lines.length; };
+  const rec = (status, note, k) => {
+    out.flat.push({ para: ctx.curPara, ln: st.ln, k: k || st.k.toLowerCase(), status,
+      conf: Math.round(100 * (PY_CONF[(k || st.k).toLowerCase()] !== undefined ? PY_CONF[(k || st.k).toLowerCase()] : (PY_CONF[st.k.toLowerCase()] || 0))) / 100,
+      py: out.lines.length, note: note || null });
+  };
+  switch (st.k){
+    case 'move': {
+      const src = trVal(st.src);
+      const multi = st.srcsN > 1;
+      st.dsts.forEach(d => py(pyIdent(d) + ' = ' + src));
+      rec(multi ? 'approximated' : 'translated', multi ? 'MOVE multi-sources : seule la dernière source est envoyée (sémantique COBOL)' : null);
+      break;
+    }
+    case 'compute': {
+      const expr = st.expr.map(trVal).join(' ').replace(/\*\s+\*/g, '**').replace(/\s+/g, ' ').trim();
+      const tv = st.dst ? ctx.types.get(st.dst.toUpperCase()) : null;
+      const decs = tv && tv._pyt && tv._pyt.decs ? tv._pyt.decs : null;
+      let status = 'translated', note = null;
+      if (st.rounded && !decs){ status = 'approximated'; note = 'ROUNDED sans décimales connues → round() par défaut de Python'; }
+      py(pyIdent(st.dst) + ' = ' + (st.rounded ? 'round(' + expr + (decs ? ', ' + decs : '') + ')' : expr));
+      rec(status, note);
+      break;
+    }
+    case 'ADD': case 'SUBTRACT': case 'MULTIPLY': case 'DIVIDE': {
+      const ops = st.operands.map(trVal).join(' + ');
+      const one = st.operands.length === 1 ? trVal(st.operands[0]) : ops;
+      let status = 'translated', note = null;
+      if (st.onSize){ status = 'approximated'; note = 'ON SIZE ERROR non couvert (débordement non vérifié)'; }
+      const rnd = (e) => st.rounded ? 'round(' + e + ')' : e;
+      if (st.k === 'ADD'){
+        if (st.giving) st.giving.forEach(g => py(pyIdent(g) + ' = ' + rnd(one)));
+        else st.targets.forEach(t => py(pyIdent(t) + ' = ' + pyIdent(t) + ' + ' + one));
+      } else if (st.k === 'SUBTRACT'){
+        if (st.giving) st.giving.forEach(g => py(pyIdent(g) + ' = ' + rnd(pyIdent(st.targets[0] || '0') + ' - ' + one)));
+        else st.targets.forEach(t => py(pyIdent(t) + ' = ' + pyIdent(t) + ' - ' + one));
+      } else if (st.k === 'MULTIPLY'){
+        if (st.giving) st.giving.forEach(g => py(pyIdent(g) + ' = ' + rnd(one + ' * ' + pyIdent(st.targets[0] || '1'))));
+        else st.targets.forEach(t => py(pyIdent(t) + ' = ' + pyIdent(t) + ' * ' + one));
+      } else {
+        const t0 = pyIdent(st.targets[0] || '1');
+        if (st.giving) st.giving.forEach(g => py(pyIdent(g) + ' = ' + rnd(st.kind === 'by' ? one + ' / ' + t0 : t0 + ' / ' + one)));
+        else st.targets.forEach(t => py(pyIdent(t) + ' = ' + pyIdent(t) + ' / ' + one));
+        if (st.rounded) note = (note || '') + 'ROUNDED appliqué';
+      }
+      rec(status, note);
+      break;
+    }
+    case 'if': {
+      py('if ' + st.cond + ':');
+      const before = out.lines.length;
+      (st.then || []).forEach(s2 => trEmitStmt(out, s2, ind + '    ', ctx));
+      if (out.lines.length === before) py('    pass');
+      if (st.orelse && st.orelse.length){
+        py('else:');
+        const b2 = out.lines.length;
+        st.orelse.forEach(s2 => trEmitStmt(out, s2, ind + '    ', ctx));
+        if (out.lines.length === b2) py('    pass');
+      }
+      rec('translated', null, 'if');
+      break;
+    }
+    case 'EVALUATE': {
+      const subj = st.subject.map(trVal).join(' ').trim();
+      const isTrue = /^(TRUE|VRAI)$/i.test(subj);
+      st.whens.forEach((w, ix) => {
+        let cond;
+        const hasCmp = w.val.some(t => (t.t === 'op' && '=<>'.includes(t.v)) || (t.t === 'w' && ['NOT','GREATER','LESS','EQUAL','UNEQUAL','AND','OR'].includes(t.v.toUpperCase())));
+        const thr = w.val.findIndex(t => t.t === 'w' && ['THRU','THROUGH'].includes(t.v.toUpperCase()));
+        if (thr > 0){
+          const lo = trVal(w.val[thr - 1]), hi = trVal(w.val[thr + 1] || w.val[thr - 1]);
+          cond = '(' + lo + ' <= ' + (isTrue ? subj : subj) + ' <= ' + hi + ')';
+        } else if (isTrue || hasCmp){
+          cond = trCond(w.val, 0, new Set()).py;
+        } else {
+          cond = subj + ' == ' + trVal(w.val[0]);
+        }
+        py((ix === 0 ? 'if ' : 'elif ') + cond + ':');
+        const b2 = out.lines.length;
+        (w.body || []).forEach(s2 => trEmitStmt(out, s2, ind + '    ', ctx));
+        if (out.lines.length === b2) py('    pass');
+      });
+      if (st.other && st.other.length){
+        py('else:');
+        const b2 = out.lines.length;
+        st.other.forEach(s2 => trEmitStmt(out, s2, ind + '    ', ctx));
+        if (out.lines.length === b2) py('    pass');
+      }
+      rec(st.alsoSeen ? 'approximated' : 'translated', st.alsoSeen ? 'EVALUATE multi-sujets (ALSO) : seul le premier sujet est comparé' : null, 'evaluate');
+      break;
+    }
+    case 'PERFORM': {
+      const tgtU = String(st.target || '').toUpperCase();
+      const fname = pyIdent(st.target);
+      let status = 'translated', note = null;
+      if (!ctx.paraSet.has(tgtU)){
+        py('# PERFORM ' + st.target + ' : cible non définie (dynamique ?) — non traduit, aucune arête inventée');
+        rec('unsupported', 'cible inconnue (dynamique ou inexistante)', 'perform');
+        break;
+      }
+      if (st.thru){
+        const a = ctx.paraOrder.indexOf(tgtU), b = ctx.paraOrder.indexOf(String(st.thru).toUpperCase());
+        if (a >= 0 && b >= a){
+          ctx.paraOrder.slice(a, b + 1).forEach(n => py(pyIdent(n) + '()'));
+          status = 'approximated'; note = 'PERFORM THRU : les paragraphes intermédiaires sont appelés dans l ordre (fall-through COBOL simulé)';
+        } else {
+          py('# PERFORM ' + st.target + ' THRU ' + st.thru + ' : borne inconnue — non traduit');
+          rec('unsupported', 'borne THRU inconnue', 'perform');
+          break;
+        }
+      } else if (st.times){
+        py('for _i in range(' + st.times + '):');
+        py('    ' + fname + '()');
+      } else if (st.until){
+        py('while not (' + st.until + '):');
+        py('    ' + fname + '()');
+        status = 'approximated'; note = 'PERFORM UNTIL : test AVANT chaque itération (TEST AFTER non distingué)';
+      } else if (st.varying){
+        py(pyIdent(st.varying.v) + ' = ' + st.varying.from);
+        py('while not (' + st.varying.until + '):');
+        py('    ' + fname + '()');
+        py('    ' + pyIdent(st.varying.v) + ' += ' + st.varying.by);
+        status = 'approximated'; note = 'PERFORM VARYING : incrément après le corps, condition en Python (portée COBOL non simulée)';
+      } else {
+        py(fname + '()');
+      }
+      rec(status, note, 'perform');
+      break;
+    }
+    case 'PERFORM-INLINE': {
+      let status = 'approximated', note = 'PERFORM inline : corps traduit, sémantique de boucle approximée';
+      if (st.times){ py('for _i in range(' + st.times + '):'); }
+      else if (st.until){ py('while not (' + st.until + '):'); }
+      else if (st.varying){ py(pyIdent(st.varying.v) + ' = ' + st.varying.from); py('while not (' + st.varying.until + '):'); }
+      else { py('for _i in range(1):'); }
+      const b2 = out.lines.length;
+      (st.body || []).forEach(s2 => trEmitStmt(out, s2, ind + '    ', ctx));
+      if (st.varying) py('    ' + pyIdent(st.varying.v) + ' += ' + st.varying.by);
+      if (out.lines.length === b2) py('    pass');
+      rec(status, note, 'perform');
+      break;
+    }
+    case 'GOTO': {
+      const tgtU = String(st.target || '').toUpperCase();
+      if (ctx.paraSet.has(tgtU)){
+        py('return ' + pyIdent(st.target) + '()  # GO TO : appel terminal — la cible rendra la main au PERFORMeur');
+        rec('translated', 'GO TO traduit en appel terminal (return f()) — sémantique de saut COBOL approchée', 'goto');
+      } else {
+        py('raise RuntimeError("GO TO ' + tgtU + ' : cible inconnue (dynamique) — non traduit")');
+        rec('unsupported', 'cible inconnue (dynamique)', 'goto');
+      }
+      break;
+    }
+    case 'DISPLAY': {
+      py('print(' + (st.items || []).map(trVal).join(', ') + ')');
+      rec('translated', null, 'display');
+      break;
+    }
+    case 'INITIALIZE': {
+      let status = 'translated', note = null;
+      (st.targets || []).forEach(t => {
+        const tv = ctx.types.get(String(t).toUpperCase());
+        if (tv && tv.pic && tv._pyt){
+          py(pyIdent(t) + ' = ' + (tv._pyt.kind === 'str' ? '""' : tv._pyt.kind === 'float' ? '0.0' : '0'));
+        } else {
+          const leaves = trGroupLeaves(ctx.varList, t);
+          if (leaves.length){
+            leaves.forEach(lf => py(pyIdent(lf.name) + ' = ' + (lf._pyt && lf._pyt.kind === 'str' ? '""' : lf._pyt && lf._pyt.kind === 'float' ? '0.0' : '0')));
+            status = 'approximated'; note = 'INITIALIZE de groupe : chaque feuille typée est remise à zéro/blank';
+          } else {
+            py(pyIdent(t) + ' = None  # INITIALIZE : type inconnu');
+            status = 'approximated'; note = 'INITIALIZE sur zone sans type connu';
+          }
+        }
+      });
+      rec(status, note, 'initialize');
+      break;
+    }
+    case 'STOP': {
+      py('sys.exit(0)  # ' + (st.via || 'STOP RUN'));
+      rec('translated', null, 'stop');
+      break;
+    }
+    case 'CALL': {
+      if (st.lit !== null){
+        py(pyIdent(st.lit) + '()  # CALL programme externe : suppose une fonction Python de même nom');
+        rec('approximated', 'programme externe non fusionné ici — à relier au projet multi-fichiers', 'call');
+      } else {
+        py('# CALL via ' + st.viaVar + ' (dynamique) : cible inconnue — non traduit');
+        rec('unsupported', 'cible dynamique', 'call');
+      }
+      break;
+    }
+    case 'SET88': {
+      (st.targets || []).forEach(t => py(pyIdent(t) + ' = True'));
+      rec('translated', 'SET ... TO TRUE : niveau 88 représenté par un booléen', 'set88');
+      break;
+    }
+    case 'SET': {
+      py('# SET non couvert par le traducteur déterministe — à traiter manuellement');
+      rec('unsupported', 'forme de SET non supportée', 'unknown');
+      break;
+    }
+    case 'IO': {
+      py('# [NON TRADUIT] ' + st.text + ' — E/S fichier : accords data non inventés');
+      rec('unsupported', 'E/S fichier non couverte (déterministe)', 'io');
+      break;
+    }
+    case 'SQL': {
+      py('# [NON TRADUIT] EXEC SQL (ligne ' + st.ln + ') : accès base de données non traduit — à remplacer (dbapi…) : ' + String(st.text || '').slice(0, 90));
+      rec('unsupported', 'EXEC SQL non couvert', 'sql');
+      break;
+    }
+    case 'CICS': {
+      py('# [NON TRADUIT] EXEC CICS (ligne ' + st.ln + ') : appel CICS non traduit — à remplacer (API cible) : ' + String(st.text || '').slice(0, 90));
+      rec('unsupported', 'EXEC CICS non couvert', 'cics');
+      break;
+    }
+    case 'NOP': {
+      rec('translated', st.note || null, 'nop');
+      break;
+    }
+    default: {
+      py('# [NON TRADUIT] ' + (st.verb || st.k || 'instruction') + ' : construction non reconnue par le traducteur déterministe');
+      rec('unsupported', 'verbe ' + (st.verb || '?') + ' non reconnu', 'unknown');
+    }
+  }
+}
+
+function translateCOBOL(f){
+  // Retourne { python, stmts, stats, types, paras } — ou { error } en cas d'échec.
+  try {
+    const C = f.parsed.cobol;
+    if (!C) return { error: 'no COBOL parse result' };
+    const varList = [];
+    const types = new Map();
+    (C.vars || []).forEach(v => {
+      if (!v.name || v.name === 'FILLER' || v.level === 66) return;
+      v._pyt = v.is88 ? { kind: 'bool', decs: 0, note: 'niveau 88 (condition) → bool' } : pyPicType(v);
+      types.set(String(v.name).toUpperCase(), v);
+      varList.push(v);
+    });
+    const ctx0 = { file: f.name, warns: [], copyUsed: [] };
+    const li = cobLogicalItems(f.text, ctx0.warns);
+    const sents = expandCopies(cobSentences(li.items), cobRegistry(), ctx0, []);
+
+    const paras = [];
+    let cur = null, inProc = false;
+    const newPara = (name, ln) => { cur = { name, ln, stmts: [] }; paras.push(cur); };
+    for (const s of sents){
+      if (s.t === 'sql' || s.t === 'cics'){
+        if (!inProc) continue;
+        if (!cur) newPara('MAIN', s.ln);
+        cur.stmts.push({ k: s.t.toUpperCase(), ln: s.ln, text: s.text });
+        continue;
+      }
+      if (s.t !== 'sentence') continue;
+      const U = s.text.toUpperCase().replace(/\.\s*$/, '').trim();
+      if (/(IDENTIFICATION|ID|ENVIRONMENT|DATA|PROCEDURE)\s+DIVISION/.test(U)){ if (/PROCEDURE/.test(U)) inProc = true; continue; }
+      if (/^(FILE|WORKING-STORAGE|LINKAGE|LOCAL-STORAGE|SCREEN|REPORT|COMMUNICATION|INPUT-OUTPUT|FILE-CONTROL)\b/.test(U)) continue;
+      if (!inProc) continue;
+      const w = tkWords(U);
+      if (w.length === 1 && IDENT.test(w[0]) && !PARAGRAPH_KW.test(w[0])){ newPara(w[0], s.ln); continue; }
+      if (w.length === 2 && w[1] === 'SECTION' && IDENT.test(w[0]) && !PARAGRAPH_KW.test(w[0])){ newPara(w[0], s.ln); continue; }
+      if (!cur) newPara('MAIN', s.ln);
+      try {
+        const toks = trNormalize(trToks(s.text));
+        const r = trStmts(toks, 0, new Set());
+        r.stmts.forEach(x => { x.ln = s.ln; cur.stmts.push(x); });
+      } catch (e) {
+        cur.stmts.push({ k: 'unknown', verb: '?', ln: s.ln, err: e.message });
+      }
+    }
+
+    const paraOrder = paras.map(p => String(p.name).toUpperCase());
+    const paraSet = new Set(paraOrder);
+    const ctx = { types, varList, paraOrder, paraSet, curPara: null };
+    const out = { lines: [], flat: [] };
+    const push = (s) => out.lines.push(s);
+
+    push('#!/usr/bin/env python3');
+    push('# ─────────────────────────────────────────────────────────────────');
+    push('# Traduction automatique DÉTERMINISTE COBOL → Python (Reforge)');
+    push('# Source : ' + (C.programId || '?') + ' (' + f.name + ')');
+    push('# RELIRE AVANT UTILISATION : chaque approximation est commentée ;');
+    push('# les instructions non traduites sont marquées [NON TRADUIT].');
+    push('# ─────────────────────────────────────────────────────────────────');
+    push('from __future__ import annotations');
+    push('import sys');
+    push('');
+    push('# ── Zones de données (mapping PIC → type Python, approximation documentée) ──');
+    const globalNames = [];
+    varList.forEach(v => {
+      const pt = v._pyt;
+      if (!pt || v.is88 === false && !v.pic){ push('# (groupe) ' + v.name + ' : structure non déclarée en Python — voir zones filles'); return; }
+      const t = v.is88 ? 'bool' : pt.kind;
+      const decl = v.is88 ? 'False' : pt.kind === 'str' ? '""' : pt.kind === 'float' ? '0.0' : '0';
+      push(pyIdent(v.name) + ': ' + t + ' = ' + decl + '  # ' + (pt.note || v.name));
+      globalNames.push(pyIdent(v.name));
+    });
+    push('');
+    paras.forEach(p => {
+      ctx.curPara = p.name;
+      push('def ' + pyIdent(p.name) + '():');
+      if (globalNames.length) push('    global ' + globalNames.join(', '));
+      const before = out.lines.length;
+      p.stmts.forEach(st => trEmitStmt(out, st, '    ', ctx));
+      if (out.lines.length === before) push('    pass');
+      push('');
+    });
+    ctx.curPara = null;
+    push('def main():');
+    push('    # Le COBOL démarre au premier paragraphe puis enchaine (fall-through).');
+    push('    # Approximation : chaque paragraphe est appelé dans l ordre déclaré ;');
+    push('    # STOP RUN interrompt (sys.exit) ; GO TO rebondit vers sa cible.');
+    paras.forEach(p => push('    ' + pyIdent(p.name) + '()'));
+    push('');
+    push("if __name__ == '__main__':");
+    push('    main()');
+
+    const flat = out.flat;
+    let nT = 0, nA = 0, nU = 0;
+    flat.forEach(x => { if (x.status === 'translated') nT++; else if (x.status === 'approximated') nA++; else nU++; });
+    const total = flat.length;
+    const coverage = total ? Math.round(10 * (100 * (nT + 0.6 * nA) / total)) / 10 : 0;
+    return {
+      programId: C.programId, file: f.name, python: out.lines.join('\n'),
+      stmts: flat,
+      stats: { total, translated: nT, approximated: nA, unsupported: nU, coverage },
+      types: varList.filter(v => v._pyt).map(v => ({ name: pyIdent(v.name), pic: v.pic || (v.is88 ? '88' : '(groupe)'), py: v.is88 ? 'bool' : v._pyt.kind, note: v._pyt.note || '' })),
+      paras: paras.map(p => p.name),
+      warns: ctx0.warns
+    };
+  } catch (e) {
+    return { error: 'translation failed: ' + e.message };
+  }
+}
+
+function downloadPython(i){
+  const f = state.files[i];
+  if (!f || !f.parsed.cobol) return;
+  const T = translateCOBOL(f);
+  if (!T || T.error) return;
+  const blob = new Blob([T.python], { type: 'text/x-python' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (T.programId || base(f.name)) + '.py';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  track('export_python');
+}
 
 function levelEntry(C, w, ln, sec, fd){
   // 01  NAME  PIC 9(4)V99 [OCCURS n] [REDEFINES X] [VALUE lit].
@@ -1060,13 +2033,31 @@ function levelEntry(C, w, ln, sec, fd){
   const name = (w[1]||'').toUpperCase();
   const rest = w.slice(2).join(' ');
   const picm = rest.match(/\bPIC(?:TURE)?\s+(?:IS\s+)?([A-Z0-9SVX\.\(\)\+\-,\$*\-\/]+(?:\s+[A-Z0-9SVX\.\(\)\+\-,\$*\-\/]+)*)/i);
-  const pic = picm ? picm[1].replace(/\s+/g,'') : null;
+  let pic = null;
+  if (picm){
+    // la PIC s'arrête au premier mot-clé de clause (COMP-3, VALUE…) — sinon
+    // « PIC 9(4) COMP-3 » donnerait une PIC fausse « 9(4)COMP-3 »
+    const CLAUSE_KW = /^(COMP-?[1-5]?|COMPUTATIONAL-?[1-5]?|BINARY|PACKED-DECIMAL|DISPLAY-?[1-2]?|DISPLAY|USAGE|IS|OCCURS|REDEFINES|RENAMES|VALUE|VALUES|SYNC|SYNCHRONIZED|JUST|JUSTIFIED|BLANK|WHEN|ZERO|ZEROS|ZEROES|GLOBAL|EXTERNAL|POINTER|INDEX|INDEXED|SIGN|TRAILING|LEADING|SEPARATE|DEPENDING|TIMES)$/i;
+    const toks = picm[1].split(/\s+/).filter(Boolean);
+    const keep = [];
+    for (const tk of toks){ if (CLAUSE_KW.test(tk)) break; keep.push(tk); }
+    pic = keep.join('') || picm[1].replace(/\s+/g,'');
+  }
   const occm = rest.match(/\bOCCURS\s+(\d+)\s*(?:TIMES)?/i);
+  const occRange = rest.match(/\bOCCURS\s+\d+\s+TO\s+(\d+)\s*(?:TIMES)?/i);
+  const occDep = rest.match(/\bDEPENDING\s+ON\s+([A-Z0-9\-]+)/i);
   const redm = rest.match(/\bREDEFINES\s+([A-Z0-9\-]+)/i);
   const valm = rest.match(/\bVALUE\s+(?:IS\s+)?['"]?([^'"\s.]+)/i);
-  const v = { level: parseInt(lvl,10), name: name || 'FILLER', pic, occurs: occm?parseInt(occm[1],10):null, redefines: redm?redm[1].toUpperCase():null, value: valm?valm[1]:null, fd: fd || null, sec, ln, is88: lvl === '88' };
+  const usm = rest.match(/\b(?:USAGE\s+(?:IS\s+)?)?(COMP-3|COMP-1|COMP-2|COMP-4|COMP-5|COMPUTATIONAL-3|BINARY|PACKED-DECIMAL|DISPLAY(?:-1|-2)?)\b/i);
+  const usage = usm ? usm[1].toUpperCase().replace('COMPUTATIONAL','COMP') : null;
+  const renm = lvl === '66' ? rest.match(/\bRENAMES\s+([A-Z0-9\-]+)(?:\s+(?:THRU|THROUGH)\s+([A-Z0-9\-]+))?/i) : null;
+  const v = { level: parseInt(lvl,10), name: name || 'FILLER', pic, occurs: occRange?parseInt(occRange[1],10):(occm?parseInt(occm[1],10):null),
+    occursDepending: occDep?occDep[1].toUpperCase():null, occursTo: !!occRange,
+    redefines: redm?redm[1].toUpperCase():null, renames: renm?{ from: renm[1].toUpperCase(), thru: renm[2]?renm[2].toUpperCase():null }:null,
+    usage, value: valm?valm[1]:null, fd: fd || null, sec, ln, is88: lvl === '88' };
   C.vars.push(v);
   if (lvl === '88' && valm) (C.varLits[name] = C.varLits[name] || []).push(valm[1].toUpperCase());
+  if (occRange && !occDep) C.warns.push(`line ${ln}: OCCURS m TO n without DEPENDING ON — bounds kept, exact size unknown`);
   if (!pic && lvl !== '88' && !redm && name && name !== 'FILLER' && !/\bPIC\b|\bOCCURS\b/i.test(rest) && !w.slice(1).some(x=>/^(COMP|BINARY|PACKED|USAGE|SYNC|JUST|JUSTIFIED|BLANK|GLOBAL|EXTERNAL)$/i.test(x)))
     ; // groupe sans PIC : légitime (01 RECORD. / 05 SUB-GROUP.)
 }
@@ -1131,6 +2122,19 @@ function procSentence(C, t, s, para, opAdd){
   while ((m = cre.exec(U))) C.calls.push({ target: m[1].toUpperCase(), viaVar: null, resolved: true, ln });
   const cvre = /(?:^|[^A-Z0-9\-])CALL\s+([A-Z0-9\-]+)/g;
   while ((m = cvre.exec(UQ))) C.calls.push({ target: null, viaVar: m[1].toUpperCase(), resolved: false, ln });
+  // IMS DL/I : CALL 'CBLTDLI'/'ASMTDLI' USING op pcb record ssa… — détection
+  // honnête : l'op-code est tracé s'il vient d'un littéral ou d'un MOVE
+  // littéral (varLits) ; les SSA/noms de segment sont construits à l'exécution
+  // → jamais inventés, aucune arête vers un dataset inconnu.
+  const dlre = /CALL\s+'(CBLTDLI|ASMTDLI)'\s+USING\s+([^.;]+)/;
+  const dm = dlre.exec(U);
+  if (dm){
+    const args = dm[2].trim().split(/[\s,]+/).filter(Boolean);
+    const a0 = args[0] || '';
+    const litm = a0.match(/^'([^']*)'$/);
+    const op = litm ? litm[1].trim().toUpperCase() : ((((C.varLits[a0] || [])[0]) || '').trim().toUpperCase() || null);
+    C.dli.push({ entry: dm[1], op, args: args.length, ln, opVar: litm ? null : a0 });
+  }
 }
 
 function resolveOps(C){
@@ -1199,7 +2203,7 @@ function resolveCalls(C){
 
 function parseCOBOL(file, text, registry){
   const C = { file, programId: null, divisions: [], sections: [], paragraphs: [], vars: [], selects: [],
-    fds: [], performs: [], gotos: [], calls: [], sql: [], cics: [], cicsFiles: {}, fileOps: {}, varLits: {}, copyUsed: [], warns: [],
+    fds: [], performs: [], gotos: [], calls: [], sql: [], cics: [], cicsFiles: {}, fileOps: {}, varLits: {}, dli: [], copyUsed: [], warns: [],
     flowLast: null, dead: [], _decl: false, _alter: false };
   const li = cobLogicalItems(text, C.warns);
   C.fixed = cobDetectFixed(text);
@@ -1240,7 +2244,15 @@ function parseCOBOL(file, text, registry){
     // PROGRAM-ID — le point peut suivre directement le mot-clé ("PROGRAM-ID. X.")
     if (/^PROGRAM-ID\b/i.test(t)){
       const m = t.match(/PROGRAM-ID[.]?\s+'?([A-Z0-9\-]+)'?/i);
-      if (m && !/^DIVISION/i.test(m[1])) C.programId = m[1].toUpperCase();
+      if (m && !/^DIVISION/i.test(m[1])){
+        if (C.programId && C.programId !== m[1].toUpperCase()){
+          // sous-programmes empilés : le reste du fichier appartient au second
+          // programme — l'attribuer au premier serait un faux résultat. On s'arrête.
+          C.warns.push(`line ${s.ln}: second PROGRAM-ID '${m[1].toUpperCase()}' in the same file — stacked/nested programs are NOT split into separate nodes; analysis stops here, only ${C.programId} is analyzed`);
+          break;
+        }
+        C.programId = m[1].toUpperCase();
+      }
       else if (!m) pendingId = true;
       continue;
     }
@@ -1291,7 +2303,7 @@ function parseCOBOL(file, text, registry){
     // DECLARATIVES (gestionnaires USE implicites) — désactive l'analyse code mort
     if (div === 'PROCEDURE' && v === 'DECLARATIVES') C._decl = true;
     // paragraphe : nom seul suivi d'un point (PROCEDURE)
-    if (div === 'PROCEDURE' && w.length === 1 && IDENT.test(v) && !/^(SECTION|DIVISION|END|DECLARATIVES|EXIT|STOP|GO|PERFORM|MOVE|IF|ELSE|CALL|READ|WRITE|OPEN|CLOSE|DISPLAY|COMPUTE|ADD|SUBTRACT|MULTIPLY|DIVIDE|SET|INITIALIZE|ACCEPT|EVALUATE|END-EVALUATE|WHEN|END-IF|UNTIL|VARYING|CONTINUE|RETURN)$/.test(v)){
+    if (div === 'PROCEDURE' && w.length === 1 && IDENT.test(v) && !PARAGRAPH_KW.test(v)){
       C.paragraphs.push({ name: v, ln: s.ln });
       para = v;
       continue;
@@ -1390,7 +2402,7 @@ const CONF_RANK = { certain: 3, probable: 2, unknown: 1 };
 function warnSeverity(w){
   const u = String(w).toUpperCase();
   if (u.includes('CANNOT BE EXPANDED') || u.includes('NOT UPLOADED') || u.includes('NOT FOUND') || u.includes('NEVER EXECUTED OR CALLED')) return 1;
-  if (u.includes('UNKNOWN') || u.includes('UNCLEAR') || u.includes('UNREACHABLE') || u.includes('COULD NOT BE RESOLVED') || u.includes('VARIABLE VALUE')) return 2;
+  if (u.includes('UNKNOWN') || u.includes('UNCLEAR') || u.includes('UNREACHABLE') || u.includes('COULD NOT BE RESOLVED') || u.includes('VARIABLE VALUE') || u.includes('DUPLICATE') || u.includes('AMBIGU')) return 2;
   return 3;
 }
 
@@ -1422,6 +2434,33 @@ function buildModel(files){
     return e;
   };
   const m = { nodes, edges, fwd, rev, warnings: [], internal: {}, unknownCalls: [] };
+  // ── pré-pass P1 : identifiants en double — jamais fusionner deux programmes
+  // ou deux steps distincts, et toujours le signaler ──
+  // 1) PROGRAM-ID identique dans plusieurs fichiers : chaque fichier garde son
+  //    propre nœud (NAME, NAME#2…), les EXEC/CALL pointent la 1re définition + warning.
+  const progKeyOf = new Map(); // file.name → nom de nœud prog (désambiguïsé)
+  const progDups = [];
+  {
+    const byPid = new Map();
+    files.forEach(f => { if (f.lang === 'CBL' && f.parsed.cobol && f.parsed.cobol.programId){
+      const pid = f.parsed.cobol.programId;
+      const arr = byPid.get(pid) || []; arr.push(f.name); byPid.set(pid, arr);
+      progKeyOf.set(f.name, arr.length > 1 ? pid + '#' + arr.length : pid);
+    }});
+    byPid.forEach((arr, pid) => { if (arr.length > 1) progDups.push({ pid, arr }); });
+  }
+  progDups.forEach(d => m.warnings.push('duplicate PROGRAM-ID: program ' + d.pid + ' is defined in ' + d.arr.length +
+    ' files (' + d.arr.join(', ') + ') — two distinct programs, nodes disambiguated (' + d.pid + ', ' + d.pid + '#2…); ' +
+    'EXEC/CALL edges point to the first definition, the step may run either version'));
+  // 2) steps homonymes dans un même job : nœuds disambiguïsés (S1, S1#2…), warning
+  files.forEach(f => { if (f.lang !== 'JCL') return; (f.parsed.jobs || []).forEach(jb => {
+    const seen = new Map();
+    (jb.steps || []).forEach(st => {
+      const n = seen.get(st.name) || 0;
+      st._sname = n ? st.name + '#' + (n + 1) : st.name;
+      seen.set(st.name, n + 1);
+    });
+  }); });
   // pré-pass : nom effectif de chaque job, stable pour toutes les boucles
   const nameFiles = new Map();
   files.forEach(f => { if (f.lang === 'JCL') (f.parsed.jobs || []).forEach(jb => {
@@ -1464,11 +2503,14 @@ function buildModel(files){
       if (jb.params && (jb.params.RD || jb.params.RERUN))
         m.warnings.push('job ' + jname + ': RD/RERUN restart parameter present (' + (jb.params.RD ? 'RD=' + jb.params.RD : 'RERUN=' + jb.params.RERUN) + ') — execution may be resumed or repeated; relations shown are structural, not run counts');
       (jb.steps || []).forEach(st => {
-        const sid = 'step|' + jname + '.' + st.name;
-        addNode('step', jname + '.' + st.name, { job: jname, pgm: st.target, kind: st.kind,
-          condition: st.condition || null, cond: st.cond || null, rd: st.rd || null });
-        if (st.cond || st.condition) m.warnings.push('step ' + jname + '.' + st.name + ' is conditional (' + (st.cond ? 'COND=' + st.cond : 'IF ' + (st.condition.neg ? 'NOT ' : '') + st.condition.text) + ') — relations assume execution happens; the condition is not evaluated');
-        if (st.rd) m.warnings.push('step ' + jname + '.' + st.name + ': RD=' + st.rd + ' (automatic restart on ABEND) — the step may run twice; relations unchanged');
+        const sname = st._sname || st.name; // steps homonymes → S1, S1#2 (pré-pass ci-dessus)
+        const sid = 'step|' + jname + '.' + sname;
+        addNode('step', jname + '.' + sname, { job: jname, pgm: st.target, kind: st.kind,
+          condition: st.condition || null, cond: st.cond || null, rd: st.rd || null,
+          sort: st.sortInfo || null });
+        if (sname !== st.name) m.warnings.push('duplicate step name ' + st.name + ' in job ' + jname + ' — two distinct steps, nodes disambiguated (' + st.name + ', ' + sname + '); backrefs by step name resolve to the first occurrence');
+        if (st.cond || st.condition) m.warnings.push('step ' + jname + '.' + sname + ' is conditional (' + (st.cond ? 'COND=' + st.cond : 'IF ' + (st.condition.neg ? 'NOT ' : '') + st.condition.text) + ') — relations assume execution happens; the condition is not evaluated');
+        if (st.rd) m.warnings.push('step ' + jname + '.' + sname + ': RD=' + st.rd + ' (automatic restart on ABEND) — the step may run twice; relations unchanged');
         addEdge('job|' + jname, sid, 'contains', 'certain', [{ file: f.name, ln: st.line, note: 'EXEC ' + (st.target || '?') }]);
         // EXEC PGM → prog (uploadé) ou xpgm (externe) ; PROC non résolue → avertissement, jamais d'arête inventée
         if (st.kind === 'PGM' && st.target){
@@ -1483,10 +2525,10 @@ function buildModel(files){
             const cb = files.find(x => x.lang === 'CBL' && x.parsed.cobol && x.parsed.cobol.programId === mem);
             if (rx) addEdge(sid, 'prog|' + mem, 'exec', 'certain', [{ file: f.name, ln: st.line, note: "IKJEFT01 SYSTSIN EXEC '" + mem + "'" }]);
             else if (cb) addEdge(sid, 'prog|' + mem, 'exec', 'certain', [{ file: f.name, ln: st.line, note: "IKJEFT01 SYSTSIN EXEC '" + mem + "' (COBOL)" }]);
-            else m.warnings.push("EXEC '" + mem + "' (REXX/CLIST) in " + jname + "." + st.name + " not uploaded — cannot be expanded");
+            else m.warnings.push("EXEC '" + mem + "' (REXX/CLIST) in " + jname + "." + (st._sname || st.name) + " not uploaded — cannot be expanded");
           }
         } else if (st.kind === 'PROC'){
-          if (st.resolved === false) m.warnings.push('PROC ' + st.target + ' in ' + jname + '.' + st.name + ' not uploaded — cannot be expanded');
+          if (st.resolved === false) m.warnings.push('PROC ' + st.target + ' in ' + jname + '.' + (st._sname || st.name) + ' not uploaded — cannot be expanded');
           else if (st.target) addEdge(sid, 'xpgm|' + st.target, 'exec', 'unknown', [{ file: f.name, ln: st.line, note: 'EXEC PROC=' + st.target }]);
         }
         (st.dds || []).forEach(d => {
@@ -1494,12 +2536,96 @@ function buildModel(files){
           const op = OP_MAP[d.usage] || 'unknown';
           const dsNode = addNode('ds', d.name, { temp: !!d.temp || String(d.name).startsWith('&&'), gdg: d.gdg != null ? d.gdg : null });
           addEdge(sid, dsNode.id, op, op === 'unknown' ? 'unknown' : 'probable',
-            [{ file: f.name, ln: d.line, note: 'DD ' + d.ddname + ' DSN=' + d.name + (d.disp ? ' DISP=' + d.disp + ' — direction from DISP only, not confirmed by program I/O' : ' (no DISP)') }]);
+            [{ file: f.name, ln: d.line, note: 'DD ' + d.ddname + ' DSN=' + d.name + (d.gdg != null ? ' (GDG ' + (d.gdg > 0 ? '+' : '') + d.gdg + ')' : '') + (d.disp ? ' DISP=' + d.disp + ' — direction from DISP only, not confirmed by program I/O' : ' (no DISP)') }]);
           if (op === 'unknown') m.warnings.push('dataset ' + d.name + ': usage unclear (no DISP, no matching program) — flagged, not guessed');
+        });
+      });
+      // GDG intra-job : après une écriture (+1), une lecture (0) consomme la
+      // génération TOUTE CRÉÉE dans ce job ; une lecture (−1) ou plus ancienne
+      // lit une génération ANTÉRIEURE — signalé explicitement, jamais masqué
+      // par le nœud partagé de la base GDG.
+      const gdgW = new Map();
+      (jb.steps || []).forEach(st2 => {
+        (st2.dds || []).forEach(d => {
+          if (d.gdg == null || !d.name) return;
+          if (d.usage === 'output' && d.gdg >= 0) gdgW.set(d.name, { gen: d.gdg, step: st2._sname || st2.name });
+          else if (d.usage === 'input' && gdgW.has(d.name) && d.gdg < gdgW.get(d.name).gen - 1){
+            m.warnings.push('GDG ' + d.name + ': step ' + (st2._sname || st2.name) + ' reads generation (' + (d.gdg > 0 ? '+' : '') + d.gdg + ') but step ' + gdgW.get(d.name).step + ' wrote (+' + gdgW.get(d.name).gen + ') earlier in this job — an OLDER generation, not the one created here');
+          }
         });
       });
     });
   });
+
+  // ── Cross-job : datasets partagés entre jobs — arêtes job→job « feed ».
+  // L'ordre d'exécution réel N'EST PAS connu hors-ligne (pas de scheduler) :
+  // la direction write→read est déduite des usages DD uniquement, jamais inventée,
+  // et chaque arête est marquée « probable ». Usage inconnu → pas d'inférence.
+  // Un dataset temporaire (&&) ne quitte jamais son job.
+  const dsJobs = new Map();
+  files.forEach(f => {
+    if (f.lang !== 'JCL') return;
+    (f.parsed.jobs || []).forEach(jb => {
+      const jn = jnameOf(jb, f);
+      (jb.steps || []).forEach(st => (st.dds || []).forEach(d => {
+        if (!d.name || d.backref) return;
+        if (d.usage !== 'input' && d.usage !== 'output') return; // direction inconnue → honnête : rien
+        if (d.temp || String(d.name).startsWith('&&')) return;
+        const e2 = dsJobs.get(d.name) || { w: [], r: [] };
+        (d.usage === 'output' ? e2.w : e2.r).push({ job: jn, file: f.name, ln: d.line, step: st._sname || st.name, gen: d.gdg, ddname: d.ddname });
+        dsJobs.set(d.name, e2);
+      }));
+    });
+  });
+  const seenPair = new Set();
+  dsJobs.forEach((e2, dsn) => {
+    e2.w.forEach(W => e2.r.forEach(R2 => {
+      if (W.job === R2.job) return; // intra-job déjà traité (warnings GDG)
+      const pk = W.job + '\u0001' + R2.job + '\u0001' + dsn;
+      if (seenPair.has(pk)) return;
+      seenPair.add(pk);
+      const g = n => n != null ? ' (GDG ' + (n > 0 ? '+' : '') + n + ')' : '';
+      let note = 'cross-job: ' + W.job + ' step ' + W.step + ' writes ' + dsn + g(W.gen) + ' (DD ' + W.ddname + '), ' + R2.job + ' step ' + R2.step + ' reads it' + g(R2.gen) + ' (DD ' + R2.ddname + ') — run order inferred from I/O direction only, scheduler not analyzed';
+      if (W.gen != null && R2.gen != null && R2.gen < W.gen)
+        note += ' — reader targets an OLDER generation than the one written here';
+      addEdge('job|' + W.job, 'job|' + R2.job, 'feed', 'probable', [{ file: W.file, ln: W.ln, note }]);
+    }));
+  });
+
+  // ── Scheduler : ordres d'exécution EXPLICITES (import) → CERTAINS ──
+  // « JOB B AFTER A » déclare que B s'exécute après A : l'ordre devient certain.
+  // Un couple déjà inféré par dataset partagé (feed probable) est promu CERTAIN
+  // avec preuves fusionnées ; un couple sans dataset partagé reçoit l'arête
+  // d'ordre seule (note explicite « order only »). Jobs déclarés mais absents,
+  // prédecesseurs absents, cycles, jobs sans ligne scheduler → warnings.
+  const schedFiles = files.filter(f => f.lang === 'SCHED' && f.parsed.sched);
+  if (schedFiles.length){
+    const jobsKnown = new Set([...nodes.values()].filter(n => n.type === 'job').map(n => n.name));
+    const ensureJob = n => {
+      if (!jobsKnown.has(n)){ addNode('job', n, { referenced: true, sched: true }); jobsKnown.add(n); }
+      return 'job|' + n;
+    };
+    schedFiles.forEach(f => {
+      (f.parsed.sched.deps || []).forEach(d => {
+        if (!jobsKnown.has(d.job))
+          m.warnings.push('scheduler: job ' + d.job + ' declared in ' + f.name + ' but not uploaded — order edges kept, endpoint unknown');
+        (d.after || []).forEach(a => {
+          if (!jobsKnown.has(a) && !schedFiles.some(sf => (sf.parsed.sched.deps || []).some(x => x.job === a)))
+            m.warnings.push('scheduler: predecessor ' + a + ' (before ' + d.job + ') declared in ' + f.name + ' but not uploaded — order edge kept, source unknown');
+          const ex = eIdx.get('job|' + a + '\u0001' + 'job|' + d.job + '\u0001' + 'feed');
+          const note = ex
+            ? 'scheduler: ' + d.job + ' runs AFTER ' + a + ' (explicit import ' + f.name + ') — order CONFIRMED, dataset-inferred feed upgraded to CERTAIN'
+            : 'scheduler: ' + d.job + ' runs AFTER ' + a + ' (explicit import ' + f.name + ') — order confirmed by scheduler, no shared dataset detected (order only)';
+          addEdge(ensureJob(a), ensureJob(d.job), 'feed', 'certain', [{ file: f.name, note }]);
+        });
+      });
+    });
+    // job du projet sans ligne scheduler → son ordre inter-jobs reste déduit (PROBABLE)
+    jobsKnown.forEach(j => {
+      const mentioned = schedFiles.some(f => (f.parsed.sched.deps || []).some(d => d.job === j || d.after.includes(j)));
+      if (!mentioned) m.warnings.push('job ' + j + ': no scheduler line found — cross-job order stays dataset-inferred (PROBABLE) or unknown');
+    });
+  }
 
   // ── REXX ──
   files.forEach(f => {
@@ -1538,8 +2664,10 @@ function buildModel(files){
     const C = f.parsed.cobol;
     if (!C) return;
     if (f.lang === 'CBL' && C.programId){
-      const pid = 'prog|' + C.programId;
-      addNode('prog', C.programId, { file: f.name });
+      // PROGRAM-ID en double : chaque fichier garde son propre nœud (DUPPGM, DUPPGM#2)
+      const progName = progKeyOf.get(f.name) || C.programId;
+      const pid = 'prog|' + progName;
+      addNode('prog', progName, { file: f.name });
       // copybooks
       C.copyUsed.forEach(cu => {
         const cnode = addNode('cpy', cu.name, { file: cu.file || null });
@@ -1549,6 +2677,9 @@ function buildModel(files){
       // CALLs
       C.calls.forEach(c => {
         if (!c.target) return;
+        // IMS DL/I : entrée système, pas un programme applicatif à lier —
+        // traité ci-dessous (détection honnête, aucune arête inventée).
+        if (c.target === 'CBLTDLI' || c.target === 'ASMTDLI') return;
         const isCbl = files.some(x => x.lang === 'CBL' && x.parsed.cobol && x.parsed.cobol.programId === c.target);
         const tid = (isCbl ? 'prog|' : 'xpgm|') + c.target;
         addNode(isCbl ? 'prog' : 'xpgm', c.target, { file: isCbl ? files.find(x => x.lang==='CBL' && x.parsed.cobol && x.parsed.cobol.programId===c.target).name : null });
@@ -1556,6 +2687,16 @@ function buildModel(files){
         addEdge(pid, tid, 'call', conf, [{ file: f.name, ln: c.ln, note: 'CALL ' + (c.viaVar ? c.viaVar + ' (dynamic)' : c.target) }]);
         if (conf === 'unknown') m.unknownCalls.push(c);
       });
+      // IMS DL/I (CALL CBLTDLI/ASMTDLI) : détecté et affiché, jamais relié —
+      // PCB/segments inconnus hors ligne, aucune arête inventée, avertissement.
+      if ((C.dli || []).length){
+        const pnode = m.nodes.get(pid);
+        if (pnode){
+          pnode.data.ims = { calls: C.dli.length, ops: C.dli.map(d => d.op || 'UNKNOWN') };
+          const withOp = C.dli.filter(d => d.op).map(d => d.op).join(', ');
+          m.warnings.push('prog ' + progName + ': IMS DL/I program — ' + C.dli.length + ' CALL ' + C.dli[0].entry + (withOp ? ', op-codes: ' + withOp : ', op-codes unknown (dynamic)') + '. PCB/segment names are built at runtime, unknown offline — no relation invented');
+        }
+      }
       // DDNAME ↔ SELECT : lien certain si un verbe I/O existe (backrefs résolus)
       C.selects.forEach(sl => {
         C.fileOps[sl.file] && C.fileOps[sl.file].forEach(op => {
@@ -1571,11 +2712,11 @@ function buildModel(files){
                   if (!r) return;
                   const dsNode = addNode('ds', r.name, { temp: r.temp, gdg: r.gdg });
                   const ev = [
-                    { file: jf.name, ln: d.line, note: 'JCL: DD ' + d.ddname + ' DSN=' + (r.via ? r.via + ' → ' + r.name : r.name) },
+                    { file: jf.name, ln: d.line, note: 'JCL: DD ' + d.ddname + ' DSN=' + (r.via ? r.via + ' → ' + r.name : r.name) + (r.gdg != null ? ' (GDG ' + (r.gdg > 0 ? '+' : '') + r.gdg + ')' : '') },
                     { file: f.name, ln: sl.ln, note: 'COBOL: SELECT ' + sl.file + ' ASSIGN TO ' + sl.dd },
                     { file: f.name, ln: op.ln, note: op.cics ? 'COBOL: EXEC CICS ' + op.cics + ' FILE(' + (op.cicsFile || sl.file) + ')' : 'COBOL: ' + op.op.toUpperCase() + ' ' + sl.file }
                   ];
-                  addEdge('step|' + jnameOf(jb, jf) + '.' + st.name, dsNode.id, op.op, op.viaVar ? 'probable' : 'certain', ev);
+                  addEdge('step|' + jnameOf(jb, jf) + '.' + (st._sname || st.name), dsNode.id, op.op, op.viaVar ? 'probable' : 'certain', ev);
                 });
               });
             });
@@ -1618,17 +2759,27 @@ function buildModel(files){
       C.performs.forEach(p => inn.edges.push({ from: p.from, to: p.to, k: 'perform', ln: p.ln }));
       C.gotos.forEach(g => inn.edges.push({ from: g.from, to: g.to, k: 'goto', ln: g.ln }));
       C.cics.forEach(x => (x.handles || []).forEach(h => inn.edges.push({ from: x.para, to: h.to, k: 'handle', ln: x.ln })));
-      m.internal[C.programId] = inn;
+      m.internal[progName] = inn;
       // paragraphes/sections = nœuds du graphe (impact navigable : job → step → prog → para)
       const paraIds = new Set(C.paragraphs.map(p=>p.name));
       C.paragraphs.forEach(p => {
-        const pnode = addNode('para', C.programId + '.' + p.name, { program: C.programId, ln: p.ln, section: !!p.section, dead: (C.dead || []).some(d => d.name === p.name) });
+        const pnode = addNode('para', progName + '.' + p.name, { program: progName, ln: p.ln, section: !!p.section, dead: (C.dead || []).some(d => d.name === p.name) });
         addEdge(pid, pnode.id, 'contains', 'certain', [{ file: f.name, ln: p.ln, note: p.section ? 'section header' : 'paragraph' }]);
       });
       const pEdge = (from, to, k, conf, note, ln2) => {
         if (!from || !paraIds.has(from) || !paraIds.has(to) || from === to) return;
-        addEdge('para|' + C.programId + '.' + from, 'para|' + C.programId + '.' + to, k, conf, [{ file: f.name, ln: ln2, note }]);
+        addEdge('para|' + progName + '.' + from, 'para|' + progName + '.' + to, k, conf, [{ file: f.name, ln: ln2, note }]);
       };
+      // cibles PERFORM/GO TO non définies (dynamique via variable, forme inline) :
+      // jamais d'arête inventée, mais signalées explicitement (convention de la carte limits)
+      C.performs.forEach(pr => {
+        if (pr.to && pr.kind !== 'sort' && !paraIds.has(pr.to))
+          m.warnings.push('PERFORM ' + pr.to + ' in ' + progName + ' (line ' + pr.ln + '): target unknown (not a defined paragraph — dynamic or inline form), no edge created');
+      });
+      C.gotos.forEach(g => {
+        if (g.to && !paraIds.has(g.to))
+          m.warnings.push('GO TO ' + g.to + ' in ' + progName + ' (line ' + g.ln + '): target unknown (not a defined paragraph — dynamic GO TO?), no edge created');
+      });
       C.performs.forEach(pr => {
         pEdge(pr.from, pr.to, 'perform', 'certain', 'PERFORM ' + pr.to + (pr.thru ? ' THRU ' + pr.thru : ''), pr.ln);
         if (pr.thru) pEdge(pr.from, pr.thru, 'perform', 'certain', 'PERFORM ' + pr.to + ' THRU ' + pr.thru, pr.ln);
@@ -1639,7 +2790,7 @@ function buildModel(files){
       // EXEC CICS HANDLE CONDITION/AID err(PARA) : transfert de contrôle explicite → arête certaine
       C.cics.forEach(x => (x.handles || []).forEach(h => pEdge(x.para, h.to, 'handle', 'certain', 'EXEC CICS ' + x.cmd + ' ' + h.key + '(' + h.to + ')', x.ln)));
       if ((C.dead || []).length){
-        m.warnings.push('dead code: ' + C.dead.length + ' unreachable paragraph(s) in ' + C.programId + ' (' +
+        m.warnings.push('dead code: ' + C.dead.length + ' unreachable paragraph(s) in ' + progName + ' (' +
           C.dead.slice(0, 6).map(d => d.name).join(', ') + (C.dead.length > 6 ? ', …' : '') +
           ') — never targeted by PERFORM/GO TO, no fall-through path');
       }
@@ -1655,7 +2806,7 @@ function buildModel(files){
     (f.parsed.jobs || []).forEach(jb => {
       const jname = jnameOf(jb, f);
       (jb.steps || []).forEach(st => {
-        const sid = 'step|' + jname + '.' + st.name;
+        const sid = 'step|' + jname + '.' + (st._sname || st.name);
         (st.dds || []).forEach(d => {
           if (!d.backref) return;
           const r = resolveDD(jb, d);
@@ -1690,6 +2841,9 @@ function buildModel(files){
 function impact(model, id){
   // BFS amont/aval, profondeur ≤ 12, plus court chemin par nœud,
   // confiance = la plus faible le long du chemin.
+  // MULTI-CHEMINS : quand plusieurs plus courts chemins distincts mènent au
+  // même nœud, ils sont TOUS conservés (jusqu'à 3 par nœud, plafond anti-
+  // explosion) — un impact n'est jamais réduit à un seul itinéraire arbitraire.
   const up = { direct: [], indirect: [] };
   const down = { direct: [], indirect: [] };
   const adj = model.fwd, radj = model.rev;
@@ -1705,13 +2859,18 @@ function impact(model, id){
         if (next === id) continue;
         const conf = e.c === 'certain' ? cur.conf : (cur.conf === 'certain' ? e.c : (cur.conf === 'probable' && e.c === 'certain' ? 'probable' : 'unknown'));
         const path = cur.path.concat([next]);
-        if (seen.has(next)){
-          const ex = seen.get(next);
-          if (path.length >= ex.path.length) continue;
+        const ex = seen.get(next);
+        if (!ex){
+          const rec = { id: next, depth: cur.depth + 1, path, edge: e, conf, paths: [{ path, conf, edge: e }] };
+          seen.set(next, rec);
+          (cur.depth + 1 === 1 ? bucket.direct : bucket.indirect).push(rec);
+          q.push({ id: next, depth: cur.depth + 1, path, edge: e, conf });
+        } else if (path.length === ex.path.length && ex.paths.length < 3
+                   && !ex.paths.some(p => p.path.join('\u0001') === path.join('\u0001'))){
+          // chemin alternatif de même longueur (BFS garantit le plus court en
+          // premier) : enregistré, jamais masqué.
+          ex.paths.push({ path, conf, edge: e });
         }
-        seen.set(next, { id: next, depth: cur.depth + 1, path, edge: e, conf });
-        (cur.depth + 1 === 1 ? bucket.direct : bucket.indirect).push(seen.get(next));
-        q.push({ id: next, depth: cur.depth + 1, path, edge: e, conf });
       }
     }
   };
@@ -2312,6 +3471,779 @@ function runV2Tests(){
       return state.log.some(l => (l.text || '').indexOf('decoded from EBCDIC CP037') >= 0);
     })());
     state.files = bakG.files; state.loaded = bakG.loaded; state.log = bakG.log; state._model = null;
+    // ── 13. P1 fiabilité : identifiants en double, DLM/DATA/multi-JOB/symboliques, formats COBOL, niveaux 66/78, SQL avancé ──
+    const bakH = { files: state.files, loaded: state.loaded, log: state.log };
+    state.files = []; state.loaded = false; state.log = []; state._model = null;
+    T('V2 DLM: données in-stream DLM=%% — les lignes // et /* restent des données, seul %% termine', (() => {
+      const r = parseJCL([
+        '//DLMJ JOB 1',
+        '//S1 EXEC PGM=SORT',
+        "//SYSIN DD *,DLM='%%'",
+        'SORT FIELDS=COPY',
+        '// CECI EST UNE CARTE DONNEE',
+        '/* CELLE-CI AUSSI',
+        '%%',
+        '//S2 EXEC PGM=NEXT',
+      ].join('\n'), {});
+      const s1 = r.jobs[0].steps.find(s => s.name === 'S1');
+      const inn = s1 && s1.dds.find(d => d.ddname === 'SYSIN');
+      const s2 = r.jobs[0].steps.find(s => s.name === 'S2');
+      return inn && inn.inline && inn.inline.length === 3
+        && inn.inline[1].text.indexOf('// CECI') === 0 && inn.inline[2].text.indexOf('/* CELLE-CI') === 0
+        && !!s2 && s2.target === 'NEXT';
+    })());
+    T('V2 DD DATA sans DLM: /* termine les données, une ligne // reste une donnée', (() => {
+      const r = parseJCL([
+        '//DJ JOB 1',
+        '//S1 EXEC PGM=CPY1',
+        '//IN DD DATA',
+        'CARTE UN',
+        '// CARTE DEUX (donnée, pas une fin)',
+        '/*',
+        '//S2 EXEC PGM=CPY2',
+      ].join('\n'), {});
+      const s1 = r.jobs[0].steps.find(s => s.name === 'S1');
+      const dd = s1 && s1.dds.find(d => d.ddname === 'IN');
+      const s2 = r.jobs[0].steps.find(s => s.name === 'S2');
+      return dd && dd.inline && dd.inline.length === 2 && dd.inline[1].text.indexOf('// CARTE DEUX') === 0 && !!s2;
+    })());
+    T('V2 multi-JOB: 2 jobs dans un fichier, steps homonymes S1 de jobs distincts non fusionnés', (() => {
+      const r = parseJCL([
+        '//J1 JOB 1',
+        '//S1 EXEC PGM=PA',
+        '//J2 JOB 2',
+        '//S1 EXEC PGM=PB',
+      ].join('\n'), {});
+      const m13 = buildModel([{ name: 'MJ.JCL', lang: 'JCL', text: '', parsed: r }]);
+      return r.jobs.length === 2 && r.jobs[1].steps[0].target === 'PB'
+        && m13.nodes.has('step|J1.S1') && m13.nodes.has('step|J2.S1') && !m13.nodes.has('step|J1.S1#2');
+    })());
+    T('V2 step homonyme dans un job: nœuds S1 et S1#2 distincts + warning (plus de fusion)', (() => {
+      const r = parseJCL([
+        '//DJ JOB 1',
+        '//S1 EXEC PGM=PA',
+        '//DD1 DD DSN=A.B.C,DISP=SHR',
+        '//S1 EXEC PGM=PB',
+        '//DD1 DD DSN=D.E.F,DISP=SHR',
+      ].join('\n'), {});
+      const m13 = buildModel([{ name: 'DJ.JCL', lang: 'JCL', text: '', parsed: r }]);
+      return m13.nodes.has('step|DJ.S1') && m13.nodes.has('step|DJ.S1#2')
+        && m13.edges.some(e => e.f === 'step|DJ.S1' && e.t === 'xpgm|PA' && e.k === 'exec')
+        && m13.edges.some(e => e.f === 'step|DJ.S1#2' && e.t === 'xpgm|PB' && e.k === 'exec')
+        && m13.edges.some(e => e.f === 'step|DJ.S1#2' && e.t === 'ds|D.E.F')
+        && m13.warnings.some(w => w.indexOf('duplicate step name S1') >= 0);
+    })());
+    T('V2 PROGRAM-ID en double: 2 fichiers = 2 programmes distincts (DUPP, DUPP#2) + warning, jamais fusionnés', (() => {
+      const fx = [
+        { name: 'A.CBL', lang: 'CBL', text: "IDENTIFICATION DIVISION.\nPROGRAM-ID. DUPP.\nPROCEDURE DIVISION.\nPA.\n    STOP RUN." },
+        { name: 'B.CBL', lang: 'CBL', text: "IDENTIFICATION DIVISION.\nPROGRAM-ID. DUPP.\nPROCEDURE DIVISION.\nPB.\n    STOP RUN." },
+        { name: 'J.JCL', lang: 'JCL', text: '//J JOB 1\n//S EXEC PGM=DUPP' },
+      ];
+      fx.forEach(f => parseFile(f));
+      const m13 = buildModel(fx);
+      return m13.nodes.has('prog|DUPP') && m13.nodes.has('prog|DUPP#2')
+        && m13.nodes.get('prog|DUPP').data.file === 'A.CBL' && m13.nodes.get('prog|DUPP#2').data.file === 'B.CBL'
+        && m13.nodes.has('para|DUPP.PA') && m13.nodes.has('para|DUPP#2.PB')
+        && m13.edges.some(e => e.f === 'step|J.S' && e.t === 'prog|DUPP' && e.k === 'exec')
+        && m13.warnings.some(w => w.indexOf('duplicate PROGRAM-ID') >= 0 && w.indexOf('A.CBL') >= 0 && w.indexOf('B.CBL') >= 0);
+    })());
+    T('V2 PROC redéfini (in-stream): la dernière définition gagne + warning, plus aucun écrasement silencieux', (() => {
+      const r = parseJCL([
+        '//PJ JOB 1',
+        '//MYPROC PROC',
+        '//PA EXEC PGM=FIRST',
+        '// PEND',
+        '//MYPROC PROC',
+        '//PB EXEC PGM=SECOND',
+        '// PEND',
+        '//X EXEC PROC=MYPROC',
+      ].join('\n'), {});
+      return r.procs.MYPROC && r.procs.MYPROC.steps.length === 1 && r.procs.MYPROC.steps[0].target === 'SECOND'
+        && r.warnings.some(w => w.indexOf('PROC MYPROC redefined') >= 0);
+    })());
+    T('V2 PROC en double (2 fichiers): le dernier gagne + warning sur le fichier qui écrase', (() => {
+      const fx2 = [
+        { name: 'P1.JCL', lang: 'JCL', text: '//PP PROC\n//A EXEC PGM=FROMFIRST\n// PEND' },
+        { name: 'P2.JCL', lang: 'JCL', text: '//PP PROC\n//B EXEC PGM=FROMSECOND\n// PEND\n//J2 JOB 1\n//S EXEC PROC=PP' },
+      ];
+      fx2.forEach(f => parseFile(f));
+      state.files = fx2; // registre des procs catalogés pour linkCatalogedProcs
+      const m13 = buildModel(fx2);
+      const ok = m13.edges.some(e => e.f === 'step|J2.B' && e.t === 'xpgm|FROMSECOND')
+        && fx2[1].parsed.warnings.some(w => w.indexOf('PROC PP defined in multiple files') >= 0);
+      state.files = [];
+      return ok;
+    })());
+    T('V2 symboliques imbriquées: SET global + default PROC + override EXEC → DSN entièrement résolu', (() => {
+      const r = parseJCL([
+        '//NJ JOB 1',
+        '// SET HDR=BK.PY',
+        '//PYS PROC CYC=202611',
+        '//PS1 EXEC PGM=PAY1',
+        '//DD1 DD DSN=&HDR..&CYC,DISP=SHR',
+        '// PEND',
+        '//ST1 EXEC PROC=PYS,CYC=202612',
+      ].join('\n'), {});
+      const ps = r.jobs[0].steps.find(s => s.via === 'ST1');
+      return ps && ps.target === 'PAY1' && ps.dds[0].name === 'BK.PY.202612';
+    })());
+    T('V2 PROC imbriqué + backref: *.O1.OUT résolu à travers INP→OUTP vers &&TEMP1', (() => {
+      const r = parseJCL([
+        '//NJ2 JOB 1',
+        '//OUTP PROC',
+        '//O1 EXEC PGM=WRITE1',
+        '//OUT DD DSN=&&TEMP1,DISP=(,PASS)',
+        '// PEND',
+        '//INP PROC',
+        '//I1 EXEC PROC=OUTP',
+        '//I2 EXEC PGM=READ1',
+        '//IN DD DSN=*.O1.OUT',
+        '// PEND',
+        '//X EXEC PROC=INP',
+      ].join('\n'), {});
+      const m13 = buildModel([{ name: 'N.JCL', lang: 'JCL', text: '', parsed: r }]);
+      return m13.edges.some(e => e.f === 'step|NJ2.I2' && e.t === 'ds|&&TEMP1')
+        && !m13.warnings.some(w => w.indexOf('could not be resolved') >= 0);
+    })());
+    T('V2 COBOL mixte/directives: lignes séquencées dans du libre, >>SOURCE FREE, EJECT/SKIP ignorés, *> et "..." gérés', (() => {
+      const C = parseCOBOL('MIX.CBL', [
+        '000100 IDENTIFICATION DIVISION.',
+        '000200 PROGRAM-ID. MIXPGM.',
+        '      * commentaire style fixe',
+        '      SKIP1',
+        '      EJECT',
+        '      >>SOURCE FORMAT FREE',
+        'PROCEDURE DIVISION.',
+        'PARA-1.',
+        '    DISPLAY "double quoted".',
+        '*> commentaire flottant 2002',
+        '000300 PARAFIX.',
+        '    MOVE 5 TO WS-X.',
+        '    STOP RUN.',
+      ].join('\n'), {});
+      return C.programId === 'MIXPGM'
+        && C.paragraphs.some(p => p.name === 'PARA-1') && C.paragraphs.some(p => p.name === 'PARAFIX')
+        && !C.paragraphs.some(p => /SKIP|EJECT/.test(p.name));
+    })());
+    T('V2 data items: OCCURS DEPENDING ON, 1 TO n, niveau 66 RENAMES, 78, usage COMP-3, PIC sans collage', (() => {
+      const C = parseCOBOL('VV.CBL', [
+        'IDENTIFICATION DIVISION.',
+        'PROGRAM-ID. VV.',
+        'DATA DIVISION.',
+        'WORKING-STORAGE SECTION.',
+        '01  REC.',
+        '    05  TAB OCCURS 10 TIMES DEPENDING ON WS-N.',
+        '        10  AMT PIC 9(4)V99 COMP-3.',
+        '    05  RNG OCCURS 1 TO 50 TIMES.',
+        '66  TOTL RENAMES AMT THRU TAB.',
+        '78  MAXC VALUE 500.',
+        "    88  FLAGV VALUE 'Y'.",
+        'PROCEDURE DIVISION.',
+        'P1.',
+        '    STOP RUN.',
+      ].join('\n'), {});
+      const tab = C.vars.find(v => v.name === 'TAB');
+      const amt = C.vars.find(v => v.name === 'AMT');
+      const rng = C.vars.find(v => v.name === 'RNG');
+      const totl = C.vars.find(v => v.name === 'TOTL');
+      const maxc = C.vars.find(v => v.name === 'MAXC');
+      const flagv = C.vars.find(v => v.name === 'FLAGV');
+      return tab && tab.occurs === 10 && tab.occursDepending === 'WS-N'
+        && amt && amt.pic === '9(4)V99' && amt.usage === 'COMP-3'
+        && rng && rng.occurs === 50 && rng.occursTo === true
+        && totl && totl.renames && totl.renames.from === 'AMT' && totl.renames.thru === 'TAB'
+        && maxc && maxc.level === 78 && maxc.value === '500'
+        && flagv && flagv.is88 && C.varLits.FLAGV && C.varLits.FLAGV[0] === 'Y';
+    })());
+    T('V2 COPY REPLACING: pseudo-texte ==:XXX:== BY ==PAY== multi-paires appliqué, sans collage COMP/PIC', (() => {
+      const books = { 'BKR': { text: '01  :XXX:-REC.\n    05  :XXX:-ID PIC 9(8).\n    05  PAY-OLD PIC X.', file: 'BKR.CPY' } };
+      const C = parseCOBOL('CR.CBL', [
+        'IDENTIFICATION DIVISION.',
+        'PROGRAM-ID. CR.',
+        'DATA DIVISION.',
+        'WORKING-STORAGE SECTION.',
+        'COPY BKR REPLACING ==:XXX:== BY ==PAY== ==PAY-OLD== BY ==NEW-OLD==.',
+        'PROCEDURE DIVISION.',
+        'P1.',
+        '    STOP RUN.',
+      ].join('\n'), books);
+      const rec = C.vars.find(v => v.name === 'PAY-REC');
+      const idv = C.vars.find(v => v.name === 'PAY-ID');
+      const oldv = C.vars.find(v => v.name === 'NEW-OLD');
+      return rec && idv && oldv && idv.pic === '9(8)';
+    })());
+    T('V2 SQL avancé: CTE avec colonnes exclues, identifiants quotés qualifiés, MERGE USING, TRUNCATE, DELETE FROM', (() => {
+      const C = parseCOBOL('SQ.CBL', [
+        'IDENTIFICATION DIVISION.',
+        'PROGRAM-ID. SQ.',
+        'PROCEDURE DIVISION.',
+        'P1.',
+        '    EXEC SQL WITH R (X) AS (SELECT ID FROM BK.REAL) SELECT * FROM R, BK.R2 E WHERE R.X = E.X END-EXEC.',
+        '    EXEC SQL SELECT A FROM "MY SCH"."MY TABLE" M END-EXEC.',
+        '    EXEC SQL DELETE FROM BK.OLD WHERE K = 1 END-EXEC.',
+        '    EXEC SQL TRUNCATE TABLE BK.HUGE END-EXEC.',
+        '    EXEC SQL MERGE INTO BK.T T USING BK.S S2 ON T.I = S2.I END-EXEC.',
+        '    STOP RUN.',
+      ].join('\n'), {});
+      const t1 = C.sql[0], t2 = C.sql[1], t3 = C.sql[2], t4 = C.sql[3], t5 = C.sql[4];
+      return t1 && t1.op === 'read' && t1.tables.includes('BK.REAL') && t1.tables.includes('BK.R2')
+          && !t1.tables.includes('R') && !t1.tables.includes('E')
+        && t2 && t2.tables.includes('MY SCH.MY TABLE')
+        && t3 && t3.op === 'write' && t3.tables.includes('BK.OLD')
+        && t4 && t4.op === 'write' && t4.tables.includes('BK.HUGE')
+        && t5 && t5.op === 'update' && t5.tables.includes('BK.T') && t5.tables.includes('BK.S');
+    })());
+    T('V2 cibles dynamiques: PERFORM/GO TO vers paragraphe inexistant → warning explicite, aucune arête inventée', (() => {
+      const C = parseCOBOL('DY.CBL', [
+        'IDENTIFICATION DIVISION.',
+        'PROGRAM-ID. DY.',
+        'PROCEDURE DIVISION.',
+        'P1.',
+        '    PERFORM WS-TGT-PARA.',
+        '    GO TO WS-GOTO-TGT.',
+        '    STOP RUN.',
+      ].join('\n'), {});
+      const m13 = buildModel([{ name: 'DY.CBL', lang: 'CBL', text: '', parsed: { cobol: C, warnings: C.warns } }]);
+      return m13.warnings.some(w => w.indexOf('PERFORM WS-TGT-PARA') >= 0 && w.indexOf('no edge created') >= 0)
+        && m13.warnings.some(w => w.indexOf('GO TO WS-GOTO-TGT') >= 0)
+        && !m13.edges.some(e => e.k === 'perform' || e.k === 'goto');
+    })());
+    T('V2 programmes empilés: second PROGRAM-ID → analyse stoppée au premier, warning (rien attribué au 1er)', (() => {
+      const C = parseCOBOL('ST.CBL', [
+        'IDENTIFICATION DIVISION.',
+        'PROGRAM-ID. FIRSTP.',
+        'PROCEDURE DIVISION.',
+        'P1.',
+        '    STOP RUN.',
+        'END PROGRAM FIRSTP.',
+        'IDENTIFICATION DIVISION.',
+        'PROGRAM-ID. SECONDP.',
+        'PROCEDURE DIVISION.',
+        'Q1.',
+        '    STOP RUN.',
+      ].join('\n'), {});
+      return C.programId === 'FIRSTP'
+        && C.warns.some(w => w.indexOf('SECONDP') >= 0 && w.indexOf('stacked') >= 0)
+        && !C.paragraphs.some(p => p.name === 'Q1');
+    })());
+    state.files = bakH.files; state.loaded = bakH.loaded; state.log = bakH.log; state._model = null;
+
+    // ── Section 14 : traduction COBOL → Python déterministe ──
+    const TL14 = [
+      'IDENTIFICATION DIVISION.',
+      'PROGRAM-ID. TPP.',
+      'DATA DIVISION.',
+      'WORKING-STORAGE SECTION.',
+      '01  WS-COUNT PIC 9(4) VALUE 0.',
+      '01  WS-AMT PIC S9(7)V99 COMP-3.',
+      '01  WS-NAME PIC X(10).',
+      " 88  EOF-FLAG VALUE 'Y'.",
+      'PROCEDURE DIVISION.',
+      'PARA-1.',
+      '    MOVE 5 TO WS-COUNT.',
+      "    MOVE 'HELLO' TO WS-NAME.",
+      '    COMPUTE WS-COUNT = WS-COUNT + 1.',
+      '    COMPUTE WS-AMT ROUNDED = WS-COUNT * 1.5.',
+      '    ADD 2 TO WS-COUNT.',
+      '    SUBTRACT 1 FROM WS-COUNT.',
+      '    MULTIPLY 3 BY WS-COUNT GIVING WS-AMT.',
+      '    DIVIDE 2 INTO WS-COUNT.',
+      '    IF WS-COUNT > 4',
+      '        MOVE 1 TO WS-AMT',
+      '    ELSE',
+      '        MOVE 2 TO WS-AMT',
+      '    END-IF.',
+      '    EVALUATE WS-COUNT',
+      '        WHEN 1',
+      "            MOVE 'ONE' TO WS-NAME",
+      '        WHEN OTHER',
+      "            MOVE 'MANY' TO WS-NAME",
+      '    END-EVALUATE.',
+      '    PERFORM PARA-2.',
+      '    PERFORM PARA-2 3 TIMES.',
+      '    PERFORM PARA-2 UNTIL WS-COUNT = 9.',
+      '    PERFORM UNTIL WS-COUNT > 20',
+      '        ADD 1 TO WS-COUNT',
+      '    END-PERFORM.',
+      "    DISPLAY 'COUNT=' WS-COUNT.",
+      '    SET EOF-FLAG TO TRUE.',
+      '    INITIALIZE WS-AMT.',
+      '    READ PAY-MASTER.',
+      '    EXEC SQL SELECT X FROM BK.T END-EXEC.',
+      '    GO TO PARA-3.',
+      'PARA-2.',
+      '    STOP RUN.',
+      'PARA-3.',
+      '    EXIT.'
+    ].join('\n');
+    const TC14 = parseCOBOL('T14.CBL', TL14, {});
+    const TR14 = translateCOBOL({ name: 'T14.CBL', text: TL14, parsed: { cobol: TC14 } });
+    const PY14 = (TR14 && TR14.python) || '';
+    const ST14 = (TR14 && TR14.stats) || { total: 0, translated: 0, approximated: 0, unsupported: 0, coverage: 0 };
+    const FL14 = (TR14 && TR14.stmts) || [];
+    T('V2 Translation 14.1: translateCOBOL renvoie un résultat sans erreur', !!TR14 && !TR14.error);
+    T('V2 Translation 14.2: MOVE littéral et zone typée', PY14.includes('ws_count = 5') && PY14.includes('ws_name = "HELLO"'));
+    T('V2 Translation 14.3: COMPUTE arithmétique', PY14.includes('ws_count = ws_count + 1'));
+    T('V2 Translation 14.4: COMPUTE ROUNDED avec décimales du PIC', PY14.includes('ws_amt = round(ws_count * 1.5, 2)'));
+    T('V2 Translation 14.5: ADD / SUBTRACT / MULTIPLY GIVING / DIVIDE INTO', PY14.includes('ws_count = ws_count + 2') && PY14.includes('ws_count = ws_count - 1') && PY14.includes('ws_amt = 3 * ws_count') && PY14.includes('ws_count = ws_count / 2'));
+    T('V2 Translation 14.6: IF / ELSE / END-IF imbriqué', PY14.includes('if ws_count > 4:') && PY14.includes('else:') && PY14.includes('ws_amt = 1') && PY14.includes('ws_amt = 2'));
+    T('V2 Translation 14.7: EVALUATE WHEN / WHEN OTHER', PY14.includes('if ws_count == 1:') && PY14.includes('ws_name = "ONE"') && PY14.includes('ws_name = "MANY"'));
+    T('V2 Translation 14.8: PERFORM simple / n TIMES / UNTIL / inline END-PERFORM', PY14.includes('para_2()') && PY14.includes('for _i in range(3):') && PY14.includes('while not (ws_count == 9):') && PY14.includes('while not (ws_count > 20):'));
+    T('V2 Translation 14.9: GO TO traduit en appel terminal vers paragraphe connu', PY14.includes('return para_3()'));
+    T('V2 Translation 14.10: DISPLAY / SET 88 TO TRUE / INITIALIZE / STOP RUN', PY14.includes('print("COUNT=", ws_count)') && PY14.includes('eof_flag = True') && PY14.includes('ws_amt = 0.0') && PY14.includes('sys.exit(0)'));
+    T('V2 Translation 14.11: E/S fichier et EXEC SQL honnêtement NON traduits', ST14.unsupported === 2 && PY14.includes('[NON TRADUIT] READ PAY-MASTER') && PY14.includes('[NON TRADUIT] EXEC SQL') && !PY14.includes('read('));
+    T('V2 Translation 14.12: rapport ligne à ligne (mapping COBOL→Python)', FL14.length >= 20 && FL14[0].ln === 11 && FL14[0].k === 'move' && FL14[0].py > 0 && FL14.every(x => ['translated','approximated','unsupported'].includes(x.status)));
+    T('V2 Translation 14.13: couverture pondérée cohérente', ST14.total >= 20 && ST14.total === ST14.translated + ST14.approximated + ST14.unsupported && ST14.coverage >= 75 && ST14.coverage <= 99);
+    T('V2 Translation 14.14: types PIC→Python avec note COMP-3', (() => {
+      const ta = (TR14 && TR14.types) || [];
+      const amt = ta.find(t => t.name === 'ws_amt');
+      return !!amt && amt.py === 'float' && String(amt.note).indexOf('COMP-3') >= 0 && ta.some(t => t.name === 'ws_count' && t.py === 'int');
+    })());
+    T('V2 Translation 14.15: structure Python valide (fonctions, global, main)', PY14.includes('def para_1():') && PY14.includes('def para_2():') && PY14.includes('def main():') && PY14.includes('global ws_count') && PY14.includes("if __name__ == '__main__':"));
+    T('V2 Translation 14.16: robustesse — verbe inconnu ne fait pas crasher', (() => {
+      const g = 'IDENTIFICATION DIVISION.\nPROGRAM-ID. TG.\nPROCEDURE DIVISION.\nP1.\n    FROBNICATE X.\n    STOP RUN.';
+      const gr = translateCOBOL({ name: 'TG.CBL', text: g, parsed: { cobol: parseCOBOL('TG.CBL', g, {}) } });
+      return !!gr && !gr.error && gr.stats.unsupported >= 1 && gr.python.indexOf('FROBNICATE') >= 0;
+    })());
+
+    // ── Section 15 : impact multi-chemins, lineage aval + SORT, IMS DL/I ──
+    const mkP = (id, body) => ['IDENTIFICATION DIVISION.', 'PROGRAM-ID. ' + id + '.', 'PROCEDURE DIVISION.', 'P1.'].concat(body).join('\n');
+    const DLI_CBL = mkP('IMSP', ["    MOVE 'GN' TO DL-FUNC.", "    CALL 'CBLTDLI' USING DL-FUNC PCB-ADDR REC-AREA SSA1."]);
+    const CI15 = parseCOBOL('IMSP.CBL', DLI_CBL, {});
+    T('V2 IMS 15.1: DL/I op-code tracé via MOVE littéral (GN), args comptés', CI15.dli.length === 1 && CI15.dli[0].entry === 'CBLTDLI' && CI15.dli[0].op === 'GN' && CI15.dli[0].args === 4);
+    T('V2 IMS 15.2: DL/I op-code littéral direct (ISRT)', (() => {
+      const c2 = parseCOBOL('I2.CBL', mkP('I2', ["    CALL 'CBLTDLI' USING 'ISRT' PCB-ADDR REC-AREA."]), {});
+      return c2.dli.length === 1 && c2.dli[0].op === 'ISRT' && c2.dli[0].args === 3;
+    })());
+    T('V2 IMS 15.3: DL/I op-code dynamique non tracé → null affiché, jamais deviné', (() => {
+      const c3 = parseCOBOL('I3.CBL', mkP('I3', ['    CALL \'CBLTDLI\' USING DYN-OP PCB-ADDR REC-AREA.']), {});
+      return c3.dli.length === 1 && c3.dli[0].op === null;
+    })());
+    T('V2 IMS 15.4: ASMTDLI (assembleur interface) également détecté', (() => {
+      const c4 = parseCOBOL('I4.CBL', mkP('I4', ["    CALL 'ASMTDLI' USING 'GU' PCB-ADDR REC-AREA."]), {});
+      return c4.dli.length === 1 && c4.dli[0].entry === 'ASMTDLI' && c4.dli[0].op === 'GU';
+    })());
+    const JL15 = ['//LJ JOB 1', '//S1 EXEC PGM=SORT', '//SORTIN DD DSN=IN.DATA,DISP=SHR', '//SORTOUT DD DSN=&&SORTED,DISP=(,PASS)', '//SYSIN DD *', 'SORT FIELDS=(1,10,CH,A)', 'SUM FIELDS=NONE', '/*', '//S2 EXEC PGM=CBPAY100', '//TRANS DD DSN=*.S1.SORTOUT,DISP=OLD', '//OUTDS DD DSN=OUT.DATA,DISP=(,CATLG)'].join('\n');
+    const mkF15 = () => {
+      const fj = { name: 'LJ.JCL', lang: 'JCL', text: JL15 };
+      parseFile(fj);
+      const pgs = [
+        ["PGMA", "CALL 'PGMB';CALL 'PGC';CALL 'PGE'"],
+        ["PGMB", "CALL 'PGD'"],
+        ["PGC", "CALL 'PGD'"],
+        ["PGE", "CALL 'PGD'"],
+        ["PGD", "MOVE A TO B"],
+        ["CBPAY100", "MOVE A TO B"]
+      ];
+      const out = [fj];
+      pgs.forEach(spec => {
+        const nm = spec[0];
+        const stmts = spec[1].split(';').map(s => '    ' + s.trim() + '.');
+        const fc = { name: nm + '.CBL', lang: 'CBL', text: mkP(nm, stmts) };
+        parseFile(fc);
+        out.push(fc);
+      });
+      const fim = { name: 'IMSP.CBL', lang: 'CBL', text: DLI_CBL };
+      parseFile(fim);
+      out.push(fim);
+      return out;
+    };
+    const m15 = buildModel(mkF15());
+    T('V2 IMS 15.5: buildModel — pas de faux nœud programme CBLTDLI, warning explicite, marqueur ims', (() => {
+      const p = m15.nodes.get('prog|IMSP');
+      return !m15.nodes.has('xpgm|CBLTDLI')
+        && !!p && p.data.ims && p.data.ims.calls === 1 && p.data.ims.ops[0] === 'GN'
+        && m15.warnings.some(w => w.indexOf('IMS DL/I program') >= 0 && w.indexOf('no relation invented') >= 0);
+    })());
+    T('V2 IMS 15.6: honnêteté — aucune arête dataset/table/programme externe inventée depuis le programme IMS', !m15.edges.some(e => e.f === 'prog|IMSP' && (/^(ds|tbl|xpgm|fct|map|q)\|/.test(e.t))));
+    T('V2 SORT 15.7: cartes SYSIN du step SORT décodées et portées par le nœud step', (() => {
+      const s = m15.nodes.get('step|LJ.S1');
+      return !!s && !!s.data.sort && s.data.sort.type === 'sort' && s.data.sort.fields.length === 1
+        && s.data.sort.fields[0].pos === 1 && s.data.sort.fields[0].len === 10 && s.data.sort.fields[0].type === 'CH'
+        && s.data.sort.fields[0].order === 'A' && s.data.sort.sum === 'none';
+    })());
+    T('V2 Lineage 15.8: modèle — &&SORTED écrit par S1 et lu par S2, sorties de S2 réelles', (() => {
+      const rev = m15.rev['ds|&&SORTED'] || [];
+      return rev.some(e => e.k === 'write' && e.f === 'step|LJ.S1') && rev.some(e => e.k === 'read' && e.f === 'step|LJ.S2')
+        && (m15.fwd['step|LJ.S2'] || []).some(e => e.t === 'ds|OUT.DATA' && e.k === 'write');
+    })());
+    T('V2 Lineage 15.9: vue — Sources + Flows into + pill SORT avec champs décodés', (() => {
+      const bakI = { files: state.files, loaded: state.loaded, entity: state.entity, sub: state.sub, _model: state._model };
+      try {
+        state.files = mkF15(); state.loaded = true; state._model = null; state.sub = 'lineage';
+        renderContent();
+        const c = document.getElementById('content');
+        const h = c.innerHTML;
+        return h.indexOf('Sources') >= 0 && h.indexOf('Flows into') >= 0 && h.indexOf('SORT 1,10,CH,A') >= 0 && h.indexOf('SUM') >= 0 && h.indexOf('OUT.DATA') >= 0;
+      } finally { state.files = bakI.files; state.loaded = bakI.loaded; state.entity = bakI.entity; state.sub = bakI.sub; state._model = bakI._model; }
+    })());
+    T('V2 Impact 15.10: multi-chemins — 3 chemins distincts vers PGD, plafond 3 respecté', (() => {
+      const im = impact(m15, 'prog|PGMA');
+      const d = im.down.indirect.find(x => x.id === 'prog|PGD');
+      return !!d && d.paths.length === 3 && d.paths.every(p => p.path.length === 3 && p.conf === 'certain')
+        && new Set(d.paths.map(p => p.path.join(','))).size === 3;
+    })());
+    T('V2 Impact 15.11: deux routes seulement → 2 chemins, aucun masqué', (() => {
+      const files2 = mkF15().filter(f => f.name !== 'PGE.CBL');
+      const m2 = buildModel(files2);
+      const im = impact(m2, 'prog|PGMA');
+      const d = im.down.indirect.find(x => x.id === 'prog|PGD');
+      return !!d && d.paths.length === 2;
+    })());
+    T('V2 Impact 15.12: compatibilité — structure direct/indirect inchangée, chemins uniques à 1 voie', (() => {
+      const im = impact(m15, 'prog|PGMA');
+      const dirs = im.down.direct.filter(x => x.id.indexOf('prog|') === 0);
+      return dirs.length === 3 && dirs.every(x => x.paths.length === 1)
+        && im.down.indirect.every(x => x.paths.length >= 1 && x.path.length === x.paths[0].path.length);
+    })());
+    T('V2 Impact 15.13: compatibilité amont — step direct, job indirect', (() => {
+      const im = impact(m15, 'prog|CBPAY100');
+      return im.up.direct.length === 1 && im.up.direct[0].id === 'step|LJ.S2'
+        && im.up.indirect.some(x => x.id === 'job|LJ');
+    })());
+    T('V2 Impact 15.14: aucun nœud dupliqué dans les résultats', (() => {
+      const im = impact(m15, 'prog|PGMA');
+      const all = im.down.direct.concat(im.down.indirect).map(x => x.id);
+      return all.length === new Set(all).size;
+    })());
+
+    // ── Section 16 : cartes DFSORT (INCLUDE/OMIT/INREC/OUTREC/OUTFIL) + GDG ──
+    const SC16 = parseSortCards([
+      'SORT FIELDS=(1,10,CH,A)',
+      "INCLUDE COND=(20,3,CH,EQ,C'PAY')",
+      'INREC BUILD=(1,10,80,5)',
+      "OUTREC OVERLAY=(45:1,10)",
+      'OUTFIL FNAMES=(OUT1,OUT2)'
+    ].join('\n'));
+    T('V2 DFSORT 16.1: INCLUDE COND forme simple décodée', !!SC16.include && SC16.include.decoded === true
+      && SC16.include.conds[0].pos === 20 && SC16.include.conds[0].len === 3 && SC16.include.conds[0].type === 'CH'
+      && SC16.include.conds[0].op === 'EQ' && SC16.include.conds[0].value === "C'PAY'");
+    T('V2 DFSORT 16.2: OMIT COND forme courte avec FORMAT= global décodée', (() => {
+      const sc = parseSortCards(['SORT FORMAT=ZD,FIELDS=(1,5,A)', 'OMIT COND=(30,ZD,NE,42)'].join('\n'));
+      return !!sc.omit && sc.omit.decoded === true && sc.omit.conds[0].pos === 30 && sc.omit.conds[0].len === null
+        && sc.omit.conds[0].type === 'ZD' && sc.omit.conds[0].op === 'NE' && sc.omit.conds[0].value === '42';
+    })());
+    T('V2 DFSORT 16.3: littéral avec virgule C\'A,B\' — une seule condition décodée (quote-aware)', (() => {
+      const sc = parseSortCards(["INCLUDE COND=(1,5,CH,EQ,C'A,B')"].join('\n'));
+      return !!sc.include && sc.include.decoded === true && sc.include.conds.length === 1
+        && sc.include.conds[0].value === "C'A,B'";
+    })());
+    T('V2 DFSORT 16.4: INREC BUILD (p,l) décodé', !!SC16.inrec && SC16.inrec.decoded === true && SC16.inrec.kind === 'BUILD'
+      && SC16.inrec.items[0].pos === 1 && SC16.inrec.items[0].len === 10 && SC16.inrec.items[1].pos === 80 && SC16.inrec.items[1].len === 5);
+    T('V2 DFSORT 16.5: OUTREC OVERLAY (out:p,l) et littéral décodés', (() => {
+      const sc = parseSortCards(["OUTREC OVERLAY=(45:1,10,60:C'X')"].join('\n'));
+      return !!sc.outrec && sc.outrec.decoded === true && sc.outrec.items[0].out === 45 && sc.outrec.items[0].pos === 1
+        && sc.outrec.items[1].out === 60 && sc.outrec.items[1].literal === 'X';
+    })());
+    T('V2 DFSORT 16.6: OUTFIL FNAMES décodé', !!SC16.outfil && SC16.outfil.length === 1 && SC16.outfil[0].decoded === true
+      && SC16.outfil[0].names.join(',') === 'OUT1,OUT2');
+    const SJ16 = ['//SJ16 JOB 1', '//S1 EXEC PGM=SORT', '//SORTIN DD DSN=IN.DATA,DISP=SHR', '//SORTOUT DD DSN=OUT.DATA,DISP=OLD', '//OUT1 DD DSN=OUT.A', '//OUT2 DD DSN=OUT.B', '//SYSIN DD *', 'SORT FIELDS=(1,10,CH,A)', "INCLUDE COND=(20,3,CH,EQ,C'PAY')", 'OUTFIL FNAMES=(OUT1,OUT2)', '/*'].join('\n');
+    const PJ16 = parseJCL(SJ16, {});
+    T('V2 DFSORT 16.7: OUTFIL → DD sans DISP promus sorties connues du step (plus « unknown »)', (() => {
+      const s1 = PJ16.jobs[0].steps.find(s => s.name === 'S1');
+      const o1 = s1.dds.find(d => d.ddname === 'OUT1');
+      const o2 = s1.dds.find(d => d.ddname === 'OUT2');
+      return o1.usage === 'output' && o2.usage === 'output' && o1.outfil === true && o2.outfil === true
+        && !PJ16.warnings.some(w => w.indexOf('OUT.A') >= 0 || w.indexOf('OUT.B') >= 0);
+    })());
+    const m16 = buildModel([{ name: 'SJ16.JCL', lang: 'JCL', text: SJ16, parsed: { engine: 'v3', jobs: PJ16.jobs, procs: PJ16.procs, warnings: PJ16.warnings } }]);
+    T('V2 DFSORT 16.8: arêtes write (probable) vers les sorties OUTFIL dans le modèle', (() => {
+      const e1 = m16.edges.find(e => e.f === 'step|SJ16.S1' && e.t === 'ds|OUT.A');
+      const e2 = m16.edges.find(e => e.f === 'step|SJ16.S1' && e.t === 'ds|OUT.B');
+      return !!(e1 && e1.k === 'write' && e1.c === 'probable') && !!(e2 && e2.k === 'write' && e2.c === 'probable');
+    })());
+    T('V2 DFSORT 16.9: stepDesc affiche INCLUDE décodé et OUTFIL', (() => {
+      const d = stepDesc({ name: 'S1', pgm: 'SORT', kind: 'PGM', dds: [], sortInfo: PJ16.jobs[0].steps.find(s => s.name === 'S1').sortInfo });
+      return d.indexOf('INCLUDE') >= 0 && d.indexOf('20:3 CH EQ') >= 0 && d.indexOf('OUTFIL') >= 0 && d.indexOf('OUT1, OUT2') >= 0;
+    })());
+    const JG16 = ['//JG16 JOB 1', '//S1 EXEC PGM=P1', '//ODD DD DSN=PAY.MAST(+1),DISP=(,CATLG)', '//S2 EXEC PGM=P2', '//IDD DD DSN=PAY.MAST(0),DISP=SHR'].join('\n');
+    const m16g = buildModel([{ name: 'JG16.JCL', lang: 'JCL', text: JG16, parsed: { engine: 'v3', jobs: parseJCL(JG16, {}).jobs, procs: {}, warnings: [] } }]);
+    T('V2 GDG 16.10: générations relatives dans les preuves (+1 puis 0), pas de faux avertissement', (() => {
+      const ew = m16g.edges.find(e => e.f === 'step|JG16.S1' && e.t === 'ds|PAY.MAST');
+      const er = m16g.edges.find(e => e.f === 'step|JG16.S2' && e.t === 'ds|PAY.MAST');
+      return !!(ew && ew.ev[0].note.indexOf('GDG +1') >= 0) && !!(er && er.ev[0].note.indexOf('GDG 0') >= 0)
+        && !m16g.warnings.some(w => w.indexOf('OLDER generation') >= 0);
+    })());
+    const JG17 = ['//JG17 JOB 1', '//S1 EXEC PGM=P1', '//ODD DD DSN=PAY.MAST(+1),DISP=(,CATLG)', '//S2 EXEC PGM=P2', '//IDD DD DSN=PAY.MAST(-1),DISP=SHR'].join('\n');
+    const m17g = buildModel([{ name: 'JG17.JCL', lang: 'JCL', text: JG17, parsed: { engine: 'v3', jobs: parseJCL(JG17, {}).jobs, procs: {}, warnings: [] } }]);
+    T('V2 GDG 16.11: lecture dune génération ANTÉRIEURE signalée explicitement', m17g.warnings.some(w => w.indexOf('GDG PAY.MAST') >= 0 && w.indexOf('OLDER generation') >= 0 && w.indexOf('S2') >= 0));
+    const JG18 = ['//JG18 JOB 1', '//S1 EXEC PGM=P2', '//IDD DD DSN=PAY.MAST(0),DISP=SHR', '//S2 EXEC PGM=P1', '//ODD DD DSN=PAY.MAST(+1),DISP=(,CATLG)'].join('\n');
+    const m18g = buildModel([{ name: 'JG18.JCL', lang: 'JCL', text: JG18, parsed: { engine: 'v3', jobs: parseJCL(JG18, {}).jobs, procs: {}, warnings: [] } }]);
+    T('V2 GDG 16.12: lecture AVANT écriture (+1) → pas de faux positif', !m18g.warnings.some(w => w.indexOf('OLDER generation') >= 0));
+    T('V2 GDG 16.13: sans numéro de génération, la preuve reste inchangée (pas de mention GDG)', (() => {
+      const jn = ['//JN JOB 1', '//S1 EXEC PGM=P1', '//DD1 DD DSN=PLAIN.DATA,DISP=SHR'].join('\n');
+      const mn = buildModel([{ name: 'JN.JCL', lang: 'JCL', text: jn, parsed: { engine: 'v3', jobs: parseJCL(jn, {}).jobs, procs: {}, warnings: [] } }]);
+      const e = mn.edges.find(x => x.t === 'ds|PLAIN.DATA');
+      return !!e && e.ev[0].note.indexOf('GDG') < 0;
+    })());
+    T('V2 GDG 16.14: vue lineage — pill GDG sur la base PAY.MAST', (() => {
+      const bakJ = { files: state.files, loaded: state.loaded, entity: state.entity, sub: state.sub, _model: state._model };
+      try {
+        state.files = [{ name: 'JG16.JCL', lang: 'JCL', text: JG16, parsed: { engine: 'v3', jobs: parseJCL(JG16, {}).jobs, procs: {}, warnings: [] } }];
+        state.loaded = true; state._model = null; state.sub = 'lineage';
+        renderContent();
+        const h = document.getElementById('content').innerHTML;
+        return h.indexOf('PAY.MAST') >= 0 && h.indexOf('GDG') >= 0 && h.indexOf('Sources') >= 0;
+      } finally { state.files = bakJ.files; state.loaded = bakJ.loaded; state.entity = bakJ.entity; state.sub = bakJ.sub; state._model = bakJ._model; }
+    })());
+
+    // ── Section 17 : relations inter-jobs (datasets partagés, ordre déduit) ──
+    const XJ1 = ['//J1 JOB (A),X', '//S1 EXEC PGM=PA', '//DD1 DD DSN=APP.D1(+1),DISP=(,CATLG)'].join('\n');
+    const XJ2 = ['//J2 JOB (A),X', '//S1 EXEC PGM=PB', '//DD1 DD DSN=APP.D1(0),DISP=SHR'].join('\n');
+    const mkJ = (n, t) => ({ name: n, lang: 'JCL', text: t, parsed: { engine: 'v3', jobs: parseJCL(t, {}).jobs, procs: {}, warnings: [] } });
+    const mx = buildModel([mkJ('XJ1.JCL', XJ1), mkJ('XJ2.JCL', XJ2)]);
+    T('V2 XJOB 17.1: J1 écrit APP.D1(+1), J2 lit (0) → arête feed job→job probable', (() => {
+      const fe = mx.edges.find(e => e.k === 'feed' && e.f === 'job|J1' && e.t === 'job|J2');
+      return !!fe && fe.c === 'probable' && fe.ev[0].note.indexOf('cross-job') >= 0
+        && fe.ev[0].note.indexOf('GDG +1') >= 0 && fe.ev[0].note.indexOf('GDG 0') >= 0;
+    })());
+    T('V2 XJOB 17.2: lecture (-1) → note génération plus ANCIENNE explicite', (() => {
+      const XJ3 = ['//J3 JOB (A),X', '//S1 EXEC PGM=PB', '//DD1 DD DSN=APP.D1(-1),DISP=SHR'].join('\n');
+      const m2 = buildModel([mkJ('XJ1.JCL', XJ1), mkJ('XJ3.JCL', XJ3)]);
+      const fe = m2.edges.find(e => e.k === 'feed' && e.f === 'job|J1' && e.t === 'job|J3');
+      return !!fe && fe.ev[0].note.indexOf('OLDER generation') >= 0;
+    })());
+    T('V2 XJOB 17.3: dataset temporaire && → aucune arête feed inter-jobs', (() => {
+      const T1 = ['//J4 JOB (A),X', '//S1 EXEC PGM=PA', '//DD1 DD DSN=&&TMP1,DISP=(,PASS)'].join('\n');
+      const T2 = ['//J5 JOB (A),X', '//S1 EXEC PGM=PB', '//DD1 DD DSN=&&TMP1,DISP=(OLD,DELETE)'].join('\n');
+      const mt = buildModel([mkJ('J4.JCL', T1), mkJ('J5.JCL', T2)]);
+      return !mt.edges.some(e => e.k === 'feed');
+    })());
+    T('V2 XJOB 17.4: écriture et lecture dans le même job → pas de feed (déjà intra-job)', (() => {
+      const S1 = ['//J6 JOB (A),X', '//S1 EXEC PGM=PA', '//DD1 DD DSN=APP.D4,DISP=(,CATLG)', '//S2 EXEC PGM=PB', '//DD2 DD DSN=APP.D4,DISP=SHR'].join('\n');
+      const m4 = buildModel([mkJ('J6.JCL', S1)]);
+      return !m4.edges.some(e => e.k === 'feed');
+    })());
+    T('V2 XJOB 17.5: DD sans DISP ni programme → aucune inférence de direction', (() => {
+      const U1 = ['//J7 JOB (A),X', '//S1 EXEC PGM=PA', '//DD1 DD DSN=APP.NX'].join('\n');
+      const U2 = ['//J8 JOB (A),X', '//S1 EXEC PGM=PB', '//DD1 DD DSN=APP.NX'].join('\n');
+      const mu = buildModel([mkJ('J7.JCL', U1), mkJ('J8.JCL', U2)]);
+      return !mu.edges.some(e => e.k === 'feed');
+    })());
+    T('V2 XJOB 17.6: impact propage job→job via l arête feed', (() => {
+      const imp = impact(mx, 'job|J1');
+      return !!(imp.down.direct || []).some(r => r.id === 'job|J2');
+    })());
+    T('V2 XJOB 17.7: vue flow affiche la carte Cross-job dependencies', (() => {
+      const bakK = { files: state.files, loaded: state.loaded, entity: state.entity, sub: state.sub, _model: state._model };
+      try {
+        state.files = [mkJ('XJ1.JCL', XJ1), mkJ('XJ2.JCL', XJ2)];
+        state.loaded = true; state._model = null; state.sub = 'flow';
+        renderContent();
+        const h = document.getElementById('content').innerHTML;
+        return h.indexOf('Cross-job dependencies') >= 0 && h.indexOf('feeds') >= 0 && h.indexOf('PROBABLE') >= 0;
+      } finally { state.files = bakK.files; state.loaded = bakK.loaded; state.entity = bakK.entity; state.sub = bakK.sub; state._model = bakK._model; }
+    })());
+
+    // ── Section 18 : conditions complexes DFSORT + OPTION COPY ──
+    T('V2 DFSORT 18.1: OR explicite → 2 conditions jointes par OR', (() => {
+      const sc = parseSortCards(["INCLUDE COND=(5,1,CH,EQ,C'X',OR,10,2,ZD,GT,3)"].join('\n'));
+      return !!sc.include && sc.include.decoded === true && sc.include.conds.length === 2
+        && sc.include.joins.length === 1 && sc.include.joins[0] === 'OR'
+        && sc.include.conds[0].value === "C'X'" && sc.include.conds[1].type === 'ZD' && sc.include.conds[1].value === '3';
+    })());
+    T('V2 DFSORT 18.2: virgule implicite entre 2 conditions = AND', (() => {
+      const sc = parseSortCards(["OMIT COND=(1,5,CH,EQ,C'A',(6,2,CH,NE,C'B'))"].join('\n'));
+      return !!sc.omit && sc.omit.decoded === true && sc.omit.conds.length === 2
+        && sc.omit.joins.length === 1 && sc.omit.joins[0] === 'AND' && sc.omit.conds[1].value === "C'B'";
+    })());
+    T('V2 DFSORT 18.3: groupe imbriqué + AND explicite → 3 conditions, joins OR,AND', (() => {
+      const sc = parseSortCards(["INCLUDE COND=((1,5,CH,EQ,C'A',OR,2,1,CH,EQ,C'B'),AND,10,2,ZD,LT,5)"].join('\n'));
+      return !!sc.include && sc.include.decoded === true && sc.include.conds.length === 3
+        && sc.include.joins.length === 2 && sc.include.joins[0] === 'OR' && sc.include.joins[1] === 'AND';
+    })());
+    T('V2 DFSORT 18.4: comparaison champ-à-champ (p,l,type,OP,p2,l2) décodée', (() => {
+      const sc = parseSortCards(['INCLUDE COND=(1,5,CH,EQ,10,5)'].join('\n'));
+      return !!sc.include && sc.include.decoded === true && sc.include.conds[0].field2 === true
+        && sc.include.conds[0].value === '10,5' && sc.include.conds[0].op === 'EQ';
+    })());
+    T('V2 DFSORT 18.5: OPTION COPY → type copy, aucune invention', (() => {
+      const sc = parseSortCards(['OPTION COPY'].join('\n'));
+      return sc.type === 'copy' && sc.optionCopy === true && sc.decoded === true;
+    })());
+    T('V2 DFSORT 18.6: forme courte FORMAT= avec OR reste décodée', (() => {
+      const sc = parseSortCards(['SORT FORMAT=ZD,FIELDS=(1,5,A)', 'OMIT COND=(5,ZD,EQ,3,OR,6,ZD,NE,4)'].join('\n'));
+      return !!sc.omit && sc.omit.decoded === true && sc.omit.conds.length === 2
+        && sc.omit.conds[0].len === null && sc.omit.joins[0] === 'OR';
+    })());
+    T('V2 DFSORT 18.7: sous-condition inconnue → carte entière brute, jamais devinée', (() => {
+      const sc = parseSortCards(["INCLUDE COND=(1,5,CH,EQ)"].join('\n'));
+      return !!sc.include && sc.include.decoded === false && sc.include.conds.length === 0;
+    })());
+    T('V2 DFSORT 18.8: stepDesc affiche le OR entre conditions décodées', (() => {
+      const sc = parseSortCards(["INCLUDE COND=(5,1,CH,EQ,C'X',OR,10,2,ZD,GT,3)"].join('\n'));
+      const d = stepDesc({ name: 'S1', pgm: 'SORT', kind: 'PGM', dds: [], sortInfo: sc });
+      return d.indexOf('INCLUDE') >= 0 && d.indexOf(' OR ') >= 0 && d.indexOf('5:1 CH EQ') >= 0;
+    })());
+
+    // ── Section 19 : moteur IA opt-in (grounded, jamais simulé) ──
+    const AIf = (() => {
+      const AJ = ['//AJOB JOB (A),X', '//S1 EXEC PGM=APAY', '//DD1 DD DSN=AI.D1(+1),DISP=(,CATLG)'].join('\n');
+      const AC = ['       IDENTIFICATION DIVISION.', '       PROGRAM-ID. APAY.', '       PROCEDURE DIVISION.', '       A-P.', '           STOP RUN.'].join('\n');
+      const ff = [{ name: 'AJOB.JCL', text: AJ }, { name: 'APAY.CBL', text: AC }];
+      ff.forEach(x => { x.lang = detectLang(x.name, x.text); parseFile(x); });
+      return ff;
+    })();
+    const mAI = buildModel(AIf);
+    T('V2 AI 19.1: contexte IA = faits, preuves, voisins et zones inconnues uniquement', (() => {
+      const ctx = buildAiContext(mAI, 'prog|APAY');
+      return !!ctx && ctx.entity && ctx.entity.name === 'APAY' && ctx.entity.type === 'prog'
+        && Array.isArray(ctx.upstream) && Array.isArray(ctx.downstream)
+        && !!ctx.modelCoverage && ctx.modelCoverage.nodes === mAI.nodes.size
+        && ctx.modelCoverage.edges === mAI.edges.length && Array.isArray(ctx.modelCoverage.unknowns);
+    })());
+    T('V2 AI 19.2: prompt garde-fou — répondre uniquement depuis le contexte, citer les preuves', (() => {
+      const ctx = buildAiContext(mAI, 'step|AJOB.S1');
+      const p = buildAiPrompt(ctx);
+      return p.system.indexOf('ONLY from the provided context') >= 0 && p.system.indexOf('never invent') >= 0
+        && p.user.indexOf('AJOB') >= 0 && p.user.indexOf('APAY') >= 0 && p.user.indexOf('AI.D1') >= 0;
+    })());
+    T('V2 AI 19.3: la clé API ne figure jamais dans le contexte ni le prompt', (() => {
+      try {
+        sessionStorage.setItem('reforge_api_key', 'sk-test-1234');
+        const ctx = buildAiContext(mAI, 'job|AJOB');
+        const p = buildAiPrompt(ctx);
+        return JSON.stringify(ctx).indexOf('sk-test-1234') < 0 && (p.user + p.system).indexOf('sk-test-1234') < 0;
+      } finally { sessionStorage.removeItem('reforge_api_key'); }
+    })());
+    T('V2 AI 19.4: sans endpoint ni clé → aiReady faux, mode déterministe honnête', (() => {
+      sessionStorage.removeItem('reforge_ai_url'); sessionStorage.removeItem('reforge_api_key');
+      return aiReady() === false;
+    })());
+    T('V2 AI 19.5: appel API — Bearer + contexte seulement, réponse étiquetée source ai', (() => {
+      const captured = {};
+      const oldFetch = window.fetch;
+      window.fetch = (url, opts) => {
+        captured.url = url; captured.headers = opts.headers; captured.body = JSON.parse(opts.body);
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'MODEL-ANSWER' } }] }) });
+      };
+      sessionStorage.setItem('reforge_ai_url', 'https://api.test/v1/chat/completions');
+      sessionStorage.setItem('reforge_ai_model', 'test-model');
+      sessionStorage.setItem('reforge_api_key', 'sk-test-1234');
+      const bakL = { files: state.files, loaded: state.loaded, entity: state.entity, _model: state._model };
+      state.files = AIf; state.loaded = true; state.entity = 'job|AJOB'; state._model = null;
+      aiExplain().then(r => {
+        window.fetch = oldFetch;
+        sessionStorage.removeItem('reforge_ai_url'); sessionStorage.removeItem('reforge_ai_model'); sessionStorage.removeItem('reforge_api_key');
+        out.push({ name: 'V2 AI 19.5 (async): appel API — Bearer + contexte seulement, réponse source ai', pass: !!r
+          && r.source === 'ai' && r.model === 'test-model' && r.text === 'MODEL-ANSWER'
+          && captured.url === 'https://api.test/v1/chat/completions'
+          && captured.headers.Authorization === 'Bearer sk-test-1234'
+          && captured.body.messages.length === 2 && captured.body.temperature === 0
+          && JSON.stringify(captured.body).indexOf('sk-test-1234') < 0 });
+        state.files = bakL.files; state.loaded = bakL.loaded; state.entity = bakL.entity; state._model = null;
+      });
+      return true; // résultat poussé asynchronement ci-dessus
+    })());
+    T('V2 AI 19.6: vue AI — réglages visibles, sans config → mode déterministe affiché', (() => {
+      sessionStorage.removeItem('reforge_ai_url'); sessionStorage.removeItem('reforge_api_key');
+      const bakM = { files: state.files, loaded: state.loaded, entity: state.entity, sub: state.sub, _model: state._model };
+      try {
+        state.files = AIf; state.loaded = true; state._model = null; state.sub = 'ai';
+        renderContent();
+        const h = document.getElementById('content').innerHTML;
+        return h.indexOf('aiUrlInput') >= 0 && h.indexOf('AI off') >= 0 && h.indexOf('AI-PROPOSED') >= 0;
+      } finally { state.files = bakM.files; state.loaded = bakM.loaded; state.entity = bakM.entity; state.sub = bakM.sub; state._model = bakM._model; }
+    })());
+    T('V2 AI 19.7: la télémétrie ne transporte jamais clé ni contenu', (() => {
+      const seen = [];
+      window.gtag = (a, b) => { seen.push([a, b]); };
+      track('import_project');
+      window.gtag = undefined;
+      return seen.length === 1 && seen[0][0] === 'event' && seen[0][1] === 'import_project';
+    })());
+
+    // ── Section 20 : import scheduler — ordre explicite → CERTAIN ──
+    const SC20 = ['# planning export', 'JOB J2 AFTER J1', 'JOB J3 AFTER J2', '* commentaire'].join('\n');
+    T('V2 SCHED 20.1: détection .sched et format JOB…AFTER', (() => {
+      const f1 = detectLang('PLAN.SCH', SC20);
+      const f2 = detectLang('plan.txt', SC20);
+      const f3 = detectLang('JCLLIKE.JCL', SC20);
+      return f1 === 'SCHED' && f2 === 'SCHED' && f3 === 'JCL';
+    })());
+    T('V2 SCHED 20.2: parseSched — 2 dépendances, commentaires ignorés, aucun warning', (() => {
+      const S = parseSched(SC20);
+      return S.deps.length === 2 && S.deps.some(d => d.job === 'J2' && d.after.join(',') === 'J1')
+        && S.deps.some(d => d.job === 'J3' && d.after.join(',') === 'J2') && S.warnings.length === 0;
+    })());
+    T('V2 SCHED 20.3: ligne inconnue et auto-dépendance → warnings explicites, jamais devinées', (() => {
+      const S = parseSched(['RUN J9 EVERY DAY', 'JOB J4 AFTER J4'].join('\n'));
+      return S.warnings.some(w => w.indexOf('not a "JOB … AFTER …" declaration') >= 0)
+        && S.warnings.some(w => w.indexOf('AFTER itself') >= 0) && S.deps.length === 1;
+    })());
+    T('V2 SCHED 20.4: doublons fusionnés en union, jamais écrasés', (() => {
+      const S = parseSched(['JOB J2 AFTER J1', 'JOB J2 AFTER J9, J1'].join('\n'));
+      const d2 = S.deps.find(d => d.job === 'J2');
+      return S.deps.length === 1 && d2.after.length === 2 && d2.after.includes('J1') && d2.after.includes('J9');
+    })());
+    T('V2 SCHED 20.5: cycle A↔B signalé, arêtes conservées telles quelles', (() => {
+      const S = parseSched(['JOB JA AFTER JB', 'JOB JB AFTER JA'].join('\n'));
+      return S.deps.length === 2 && S.warnings.some(w => w.indexOf('cycle') >= 0);
+    })());
+    T('V2 SCHED 20.6: ordre explicite CONFIRME un feed dataset → promu CERTAIN, preuves fusionnées', (() => {
+      const SC = 'JOB J2 AFTER J1';
+      const fs = [mkJ('XJ1.JCL', XJ1), mkJ('XJ2.JCL', XJ2),
+        { name: 'PLAN.SCH', lang: 'SCHED', text: SC, parsed: { engine: 'v3', sched: parseSched(SC), warnings: [] } }];
+      const ms = buildModel(fs);
+      const fe = ms.edges.find(e => e.k === 'feed' && e.f === 'job|J1' && e.t === 'job|J2');
+      const notes = fe ? fe.ev.map(x => x.note).join(' · ') : '';
+      return !!fe && fe.c === 'certain' && notes.indexOf('cross-job') >= 0 && notes.indexOf('scheduler') >= 0
+        && notes.indexOf('upgraded to CERTAIN') >= 0;
+    })());
+    T('V2 SCHED 20.7: couple sans dataset partagé → arête d ordre seul, note explicite', (() => {
+      const SC = 'JOB J2 AFTER J1';
+      const U1 = ['//J1 JOB (A),X', '//S1 EXEC PGM=PA', '//DD1 DD DSN=UN.SHARED.A,DISP=(,CATLG)'].join('\n');
+      const U2 = ['//J2 JOB (A),X', '//S1 EXEC PGM=PB', '//DD1 DD DSN=OTHER.DS,DISP=SHR'].join('\n');
+      const fs = [mkJ('U1.JCL', U1), mkJ('U2.JCL', U2),
+        { name: 'PLAN.SCH', lang: 'SCHED', text: SC, parsed: { engine: 'v3', sched: parseSched(SC), warnings: [] } }];
+      const ms = buildModel(fs);
+      const fe = ms.edges.find(e => e.k === 'feed' && e.f === 'job|J1' && e.t === 'job|J2');
+      return !!fe && fe.c === 'certain' && fe.ev.length === 1 && fe.ev[0].note.indexOf('order only') >= 0;
+    })());
+    T('V2 SCHED 20.8: job déclaré mais absent du projet → nœud référencé + warning', (() => {
+      const SC = 'JOB J3 AFTER J2';
+      const fs = [mkJ('XJ1.JCL', XJ1), mkJ('XJ2.JCL', XJ2),
+        { name: 'PLAN.SCH', lang: 'SCHED', text: SC, parsed: { engine: 'v3', sched: parseSched(SC), warnings: [] } }];
+      const ms = buildModel(fs);
+      const n3 = ms.nodes.get('job|J3');
+      return !!n3 && n3.data.referenced === true
+        && ms.warnings.some(w => w.indexOf('job J3') >= 0 && w.indexOf('not uploaded') >= 0);
+    })());
+    T('V2 SCHED 20.9: job du projet sans ligne scheduler → warning ordre non confirmé', (() => {
+      const SC = 'JOB J3 AFTER J2';
+      const fs = [mkJ('XJ1.JCL', XJ1), mkJ('XJ2.JCL', XJ2),
+        { name: 'PLAN.SCH', lang: 'SCHED', text: SC, parsed: { engine: 'v3', sched: parseSched(SC), warnings: [] } }];
+      const ms = buildModel(fs);
+      return ms.warnings.some(w => w.indexOf('job J1') >= 0 && w.indexOf('no scheduler line') >= 0);
+    })());
+    T('V2 SCHED 20.10: impact propage l ordre CERTAIN du scheduler', (() => {
+      const SC = 'JOB J2 AFTER J1';
+      const fs = [mkJ('XJ1.JCL', XJ1), mkJ('XJ2.JCL', XJ2),
+        { name: 'PLAN.SCH', lang: 'SCHED', text: SC, parsed: { engine: 'v3', sched: parseSched(SC), warnings: [] } }];
+      const ms = buildModel(fs);
+      const imp = impact(ms, 'job|J1');
+      const r = (imp.down.direct || []).find(x => x.id === 'job|J2');
+      return !!r && r.conf === 'certain';
+    })());
+    T('V2 SCHED 20.11: vue flow affiche CERTAIN après import scheduler', (() => {
+      const SC = 'JOB J2 AFTER J1';
+      const schedF = { name: 'PLAN.SCH', lang: 'SCHED', text: SC, parsed: { engine: 'v3', sched: parseSched(SC), warnings: [] } };
+      const bakN = { files: state.files, loaded: state.loaded, entity: state.entity, sub: state.sub, _model: state._model };
+      try {
+        state.files = [mkJ('XJ1.JCL', XJ1), mkJ('XJ2.JCL', XJ2), schedF];
+        state.loaded = true; state._model = null; state.sub = 'flow';
+        renderContent();
+        const h = document.getElementById('content').innerHTML;
+        return h.indexOf('CERTAIN') >= 0 && h.indexOf('scheduler') >= 0;
+      } finally { state.files = bakN.files; state.loaded = bakN.loaded; state.entity = bakN.entity; state.sub = bakN.sub; state._model = bakN._model; }
+    })());
+    T('V2 SCHED 20.12: parseFile branche SCHED — warnings propagées', (() => {
+      const f = { name: 'PLAN.SCH', text: 'GARBAGE LINE' };
+      f.lang = detectLang(f.name, f.text);
+      parseFile(f);
+      return f.lang === 'SCHED' && !!f.parsed.sched && f.parsed.depCount === 0
+        && (f.parsed.warnings || []).length === 1;
+    })());
   } catch (e){
     out.push({ name: 'V2 suite crashed: ' + e.message, pass: false });
   } finally {
@@ -2357,6 +4289,10 @@ function parseFile(f){
     const R = parseREXX(f.name, t);
     f.parsed = { engine: 'v3', rexx: R, warnings: R.warns,
       programId: R.execName, calls: R.calls.length, dsns: R.dsns.length };
+  } else if (f.lang === 'SCHED'){
+    const S = parseSched(t);
+    f.parsed = { engine: 'v3', sched: S, warnings: S.warnings,
+      depCount: S.deps.reduce((n, d) => n + d.after.length, 0) };
   }
   state._model = null; // le graphe doit être reconstruit
 }
@@ -2424,7 +4360,7 @@ function stepDesc(s){
   const parts = [ s.kind === 'PROC' ? `EXEC PROC=${esc(s.pgm)}` : `EXEC PGM=${esc(s.pgm)}` ];
   const ins   = (s.dds||[]).filter(d => d.usage === 'input'  && d.name && !d.temp).map(d => esc(d.name));
   const outs  = (s.dds||[]).filter(d => d.usage === 'output' && d.name && !d.temp)
-                 .map(d => esc(d.name) + (d.gdg != null ? ` (GDG ${d.gdg >= 0 ? '+' : ''}${d.gdg})` : ''));
+                 .map(d => esc(d.name) + (d.gdg != null ? ` (GDG ${d.gdg > 0 ? '+' : ''}${d.gdg})` : ''));
   const temps = (s.dds||[]).filter(d => d.temp).map(d => esc(d.name));
   if (ins.length)   parts.push(`reads ${ins.join(', ')}`);
   if (outs.length)  parts.push(`writes ${outs.join(', ')}`);
@@ -2440,6 +4376,12 @@ function stepDesc(s){
       : (si.fields.length ? 'FIELDS=' + si.fields.map(x => `${x.pos}:${x.len} ${x.type} ${x.order}`).join(', ')
        : 'fields not decoded');
     parts.push(`<span style="color:var(--blue)">SORT ${esc(f)}${si.sum ? ' · SUM ' + esc(si.sum) : ''}</span>`);
+    const ioc = si.include || si.omit;
+    if (ioc) parts.push(`<span style="color:var(--blue)">${si.include ? 'INCLUDE' : 'OMIT'} ${ioc.decoded ? esc(ioc.conds.map((c, i) => (i ? ' ' + ((ioc.joins && ioc.joins[i-1]) || 'AND') + ' ' : '') + c.pos + (c.len != null ? ':' + c.len : '') + ' ' + c.type + ' ' + c.op + ' ' + (c.field2 ? '(' + c.value + ')' : c.value)).join('')) : 'COND=' + esc(ioc.raw) + ' (not decoded)'}</span>`);
+    const rc = si.inrec || si.outrec;
+    if (rc) parts.push(`<span style="color:var(--blue)">${si.inrec ? 'INREC' : 'OUTREC'} ${rc.kind} ${rc.decoded ? esc(rc.items.map(x => x.literal != null ? x.out + ':C&quot;' + x.literal + '&quot;' : (x.out != null ? x.out + ':' : '') + x.pos + ',' + x.len).join(', ')) : esc(rc.raw) + ' (not decoded)'}</span>`);
+    const ofl = (si.outfil || []).flatMap(x => x.names || []);
+    if (ofl.length) parts.push(`<span style="color:var(--blue)">OUTFIL → ${esc(ofl.join(', '))}</span>`);
   }
   if (s.rexxExec) parts.push(`<span style="color:var(--purple)">SYSTSIN EXEC '${esc(s.rexxExec)}' (REXX/CLIST)</span>`);
   if (s.cond) parts.push(`<span style="color:var(--yellow)">COND ${esc(String(s.cond))} (not evaluated)</span>`);
@@ -2696,6 +4638,86 @@ function saveKey(){
   renderContent();
 }
 function removeKey(){ try { sessionStorage.removeItem('reforge_api_key'); } catch(e){} _keyMem = null; renderContent(); }
+
+// ── Moteur IA (opt-in) : pipeline déterministe-first, grounded, jamais simulé ──
+// 1. CONTEXTE : extrait déterministe — entité, preuves (fichier+ligne+note),
+//    voisins directs amont/aval avec confiance, zones inconnues/warnings. Faits seulement.
+// 2. GARDE-FOU : le prompt exige de ne répondre QUE depuis le contexte, de citer
+//    les preuves, d'expliciter « inconnu » sinon — jamais inventer de noms/dépendances.
+// 3. CLÉ/ENDPOINT : sessionStorage local, jamais dans le prompt ni la télémétrie.
+// 4. APPEL : uniquement si configuré ; sinon mode déterministe hors-ligne.
+// 5. AFFICHAGE : toute réponse IA est étiquetée « AI-proposed », jamais fusionnée
+//    avec la sortie déterministe.
+function aiCfg(){
+  try { return { url: (sessionStorage.getItem('reforge_ai_url') || '').trim(),
+    model: (sessionStorage.getItem('reforge_ai_model') || '').trim(), key: getKey() || '' }; }
+  catch(e){ return { url: '', model: '', key: '' }; }
+}
+function aiReady(){ const c = aiCfg(); return !!(c.url && c.key); }
+function aiSaveCfg(){
+  try {
+    const u = document.getElementById('aiUrlInput'), mo = document.getElementById('aiModelInput');
+    if (u && u.value.trim()) sessionStorage.setItem('reforge_ai_url', u.value.trim()); else sessionStorage.removeItem('reforge_ai_url');
+    if (mo && mo.value.trim()) sessionStorage.setItem('reforge_ai_model', mo.value.trim()); else sessionStorage.removeItem('reforge_ai_model');
+  } catch(e){}
+  renderContent();
+}
+function buildAiContext(m, id){
+  const n = m && m.nodes && m.nodes.get ? m.nodes.get(id) : null;
+  if (!n) return null;
+  const imp = impact(m, id);
+  const evOf = e => (e.ev || []).slice(0, 3).map(x => (x.file || '?') + (x.ln != null ? ' L' + x.ln : '') + ' — ' + x.note);
+  return {
+    entity: { id: n.id, type: n.type, name: n.name, data: n.data || {} },
+    upstream: (imp.up.direct || []).slice(0, 8).map(r => ({ id: r.id, conf: r.conf, evidence: evOf(r.edge) })),
+    downstream: (imp.down.direct || []).slice(0, 8).map(r => ({ id: r.id, conf: r.conf, evidence: evOf(r.edge) })),
+    modelCoverage: { nodes: m.nodes.size, edges: m.edges.length,
+      unknowns: (m.warnings || []).slice(0, 12) }
+  };
+}
+function buildAiPrompt(ctx){
+  return {
+    system: 'You are a mainframe (JCL/COBOL) code analyst. Answer ONLY from the provided context. Cite the evidence lines you use (file + line + note). If something is not in the context, state explicitly that it is unknown — never invent program names, datasets, tables, JCL steps or dependencies. Respect the confidence labels (certain/probable/unknown). Your output is a PROPOSAL for a human analyst, not ground truth.',
+    user: 'Analyze this entity extracted by a deterministic analysis engine (facts + evidence only; nothing else is known):\n\n' + JSON.stringify(ctx, null, 1)
+  };
+}
+async function aiExplain(id){
+  const c = aiCfg();
+  if (!c.url || !c.key) return { source: 'deterministic', reason: 'AI endpoint/key not configured — offline deterministic mode' };
+  const m = getModel();
+  const ctx = buildAiContext(m, id || state.entity);
+  if (!ctx) return { source: 'deterministic', reason: 'entity not found' };
+  const p = buildAiPrompt(ctx);
+  let res;
+  try {
+    res = await window.fetch(c.url, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c.key },
+      body: JSON.stringify({ model: c.model || 'default', temperature: 0,
+        messages: [{ role: 'system', content: p.system }, { role: 'user', content: p.user }] }) });
+  } catch(e){ return { source: 'deterministic', reason: 'API unreachable: ' + e.message }; }
+  if (!res || !res.ok) return { source: 'deterministic', reason: 'API HTTP ' + (res ? res.status : 'error') };
+  let j = null;
+  try { j = await res.json(); } catch(e){}
+  const txt = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+  if (!txt) return { source: 'deterministic', reason: 'unexpected API response shape' };
+  return { source: 'ai', model: c.model || 'default', text: txt, context: ctx };
+}
+function aiBannerHtml(source, extra){
+  return source === 'ai'
+    ? `<p class="note" style="color:var(--yellow)">✦ <b>AI-PROPOSED</b> — generated by ${esc(extra || 'the configured model')} from cited evidence. Verify before use: this is a proposal, never ground truth. Deterministic facts remain in the other views.</p>`
+    : `<p class="note" style="color:var(--green)">⚙ Deterministic mode (offline) — ${esc(extra || 'AI not configured')}. No AI output is shown because none is produced.</p>`;
+}
+async function aiRun(){
+  const out = document.getElementById('aiOut');
+  if (out) out.innerHTML = '<p class="note">Calling model…</p>';
+  let r;
+  try { r = await aiExplain(state.entity); }
+  catch(e){ r = { source: 'deterministic', reason: 'error: ' + e.message }; }
+  const body = r.source === 'ai'
+    ? `<div style="white-space:pre-wrap;font-family:var(--mono);font-size:12px;line-height:1.6;background:var(--bg2);border:1px solid var(--line);padding:12px;border-radius:8px">${esc(r.text)}</div>`
+    : `<p class="note">${esc(r.reason || '')}</p>`;
+  if (out) out.innerHTML = aiBannerHtml(r.source, r.source === 'ai' ? r.model : r.reason) + body;
+}
 function keyStatusHTML(){
   if (getKey()) return `<div style="display:flex;flex-direction:column;gap:8px;align-items:center">
     <span class="note" style="color:var(--green)">✓ API key stored locally in your browser</span>
@@ -3065,8 +5087,14 @@ const PANELS = {
         ${(inn.dead||[]).length ? `<p class="note" style="color:var(--yellow)">☠ Unreachable (${(inn.dead||[]).length}): ${(inn.dead||[]).map(d=>esc(d.name)+' (L'+d.ln+')').join(' · ')} — no PERFORM/GO TO target, no fall-through path. Verify before deleting.</p>` : ''}
         ${inn.edges.length ? inn.edges.map(e=>`<div class="step-sub"><span class="mono" style="color:var(--accent)">${esc(e.from||'—')}</span> <span style="color:var(--purple)">—${e.k==='goto'?'GO TO':e.k==='handle'?'HANDLE':'PERFORM'}→</span> <span class="mono">${esc(e.to)}</span> <span class="note">(L${e.ln})</span></div>`).join('') : '<p class="note">No PERFORM / GO TO between paragraphs detected in this program.</p>'}
       </div>`).join('');
+    const feeds = m.edges.filter(e => e.k === 'feed');
+    const feedCard = feeds.length ? `<div class="card" style="max-width:620px;margin-bottom:14px">
+      <h3>Cross-job dependencies (shared datasets)</h3>
+      ${feeds.map(e => `<div class="step-sub"><span class="mono" style="color:var(--accent)">${esc(nodeLabel(e.f))}</span> <span style="color:var(--purple)">—feeds→</span> <span class="mono">${esc(nodeLabel(e.t))}</span> ${e.c === 'certain' ? '<span class="pill" style="color:var(--green);border:1px solid var(--green)">CERTAIN</span>' : '<span class="pill" style="color:var(--yellow);border:1px solid var(--yellow)">PROBABLE</span>'}
+      <div class="note">${esc(e.ev.map(x => x.note).join(' · '))}</div></div>`).join('')}
+      <p class="note">Order inferred from DD I/O direction (write→read) → PROBABLE. An imported scheduler export (JOB … AFTER …) confirms the order → CERTAIN. Execution order across jobs is otherwise NOT known offline.</p></div>` : '';
     if (!jobCards && !progCards) return emptyState('🔀','No job or program found','Job steps are detected from //STEP EXEC PGM= statements.');
-    return jobCards + progCards;
+    return feedCard + jobCards + progCards;
   },
 
   programs: () => {
@@ -3126,6 +5154,7 @@ const PANELS = {
         <b>${esc(it.id.split('|')[1])}</b> <span class="pill pill-io">${n?n.type:'?'}</span> ${confBadge(it.conf)}
         <span class="note">(${it.depth===1?'direct':'indirect, depth '+it.depth})</span>
         <div class="note">path: ${it.path.map(p=>esc(p.split('|')[1])).join(' ← ')}</div>
+        ${(it.paths && it.paths.length > 1) ? it.paths.slice(1).map((p,pi)=>`<div class="note" style="color:var(--yellow)">alt path ${pi+2}/${it.paths.length}: ${p.path.map(pp=>esc(pp.split('|')[1])).join(' ← ')} ${confBadge(p.conf)}</div>`).join('') : ''}
         ${it.edge ? `<div class="note">because it ${esc(EDGE_VERB[it.edge.k]||it.edge.k)} — evidence: ${esc(it.edge.ev[0]?it.edge.ev[0].file+' L'+it.edge.ev[0].ln:'n/a')}</div>` : ''}
       </div>`;
     };
@@ -3160,16 +5189,37 @@ const PANELS = {
     const html = dsNodes.map(d=>{
       const eds = m.rev[d.id]||[];
       if (!eds.length) return '';
-      return `<div class="card" style="max-width:680px;margin-bottom:14px">
-        <h3>${esc(d.name)} ${d.type==='tbl'?'<span class="pill" style="color:var(--red);border:1px solid var(--red)">DB2</span>':''}${d.data.temp?' <span class="pill" style="color:var(--purple);border:1px solid var(--purple)">TEMP</span>':''}</h3>
-        ${eds.map(e=>{
-          const prog = (m.rev[e.f]||[]).filter(x=>x.k==='exec').map(x=>nodeLabel(x.t))[0];
-          const op = ['read','write','update','delete','unknown'].includes(e.k) ? e.k : e.k.replace('sql-','');
-          return `<div style="margin-bottom:10px">
-            <span class="entity-row">${esc(nodeLabel(e.f))}</span>${prog?` <span class="note">runs ${esc(prog)}</span>`:''}
-            ${opBadge(op)} ${confBadge(e.c)}
-            ${evHTML(e.ev)}</div>`;
-        }).join('')}
+      // aval dérivé, honnête : chaque étape qui LIT ce dataset (arête réelle
+      // read/update, pas write) et les datasets qu'elle écrit — un seul saut,
+      // aucune invention, preuves des arêtes réelles.
+      const consumers = eds.filter(e => ['read','update'].includes(e.k));
+      const downOut = [];
+      const seenOut = new Set();
+      consumers.forEach(ce => {
+        (m.fwd[ce.f]||[]).forEach(oe => {
+          const on = m.nodes.get(oe.t);
+          if (oe.t !== d.id && on && on.type === 'ds' && !seenOut.has(ce.f + '\u0001' + oe.t)){
+            seenOut.add(ce.f + '\u0001' + oe.t);
+            downOut.push({ via: ce.f, e: oe });
+          }
+        });
+      });
+      const row = e => {
+        const prog = (m.rev[e.f]||[]).filter(x=>x.k==='exec').map(x=>nodeLabel(x.t))[0];
+        const op = ['read','write','update','delete','unknown'].includes(e.k) ? e.k : e.k.replace('sql-','');
+        const sn = m.nodes.get(e.f);
+        const srt = sn && sn.type === 'step' && sn.data.sort && sn.data.sort.fields && sn.data.sort.fields.length
+          ? `<span class="pill" style="color:var(--purple);border:1px solid var(--purple)" title="SORT SYSIN cards decoded — transformation shown, not guessed">SORT ${esc(sn.data.sort.fields.map(fl=>fl.pos+','+fl.len+','+fl.type+','+fl.order).join(' '))}${sn.data.sort.sum ? ' · SUM ' + esc(String(sn.data.sort.sum)) : ''}</span>` : '';
+        return `<div style="margin-bottom:10px">
+          <span class="entity-row">${esc(nodeLabel(e.f))}</span>${prog?` <span class="note">runs ${esc(prog)}</span>`:''}
+          ${opBadge(op)} ${confBadge(e.c)} ${srt}
+          ${evHTML(e.ev)}</div>`;
+      };
+        return `<div class="card" style="max-width:680px;margin-bottom:14px">
+        <h3>${esc(d.name)} ${d.type==='tbl'?'<span class="pill" style="color:var(--red);border:1px solid var(--red)">DB2</span>':''}${d.data.temp?' <span class="pill" style="color:var(--purple);border:1px solid var(--purple)">TEMP</span>':''}${d.data.gdg!=null?' <span class="pill" style="color:var(--purple);border:1px solid var(--purple)" title="GDG base — generations are relative (+1/0/−1), absolute generation unknown offline">GDG</span>':''}</h3>
+        <p class="note" style="margin-bottom:2px"><b>Sources (${eds.length})</b></p>
+        ${eds.map(row).join('')}
+        ${downOut.length ? `<p class="note" style="margin-bottom:2px;margin-top:10px"><b>Flows into (${downOut.length})</b> — via the steps that read ${esc(d.name)}</p>` + downOut.map(x=>`<div style="margin-bottom:10px"><span class="entity-row">${esc(nodeLabel(x.e.t))}</span> ${opBadge(['read','write','update','delete','unknown'].includes(x.e.k)?x.e.k:x.e.k.replace('sql-',''))} ${confBadge(x.e.c)} <span class="note">via ${esc(nodeLabel(x.via))}</span></div>`).join('') : ''}
       </div>`;
     }).join('');
     return html || emptyState('🔀','No dataset detected','Lineage is built from JCL DD statements, COBOL SELECT/ASSIGN + I/O verbs, and EXEC SQL tables.');
@@ -3240,15 +5290,36 @@ const PANELS = {
   },
 
   python: () => {
-    if (!state.loaded) return emptyState('⚡','COBOL → Python Translation','Real AI translation with a model API — planned next phase.');
+    if (!state.loaded) return emptyState('⚡','COBOL → Python Translation','Drop your COBOL files: the deterministic translator runs offline, entirely in your browser.');
     const progs = state.files.filter(f=>f.lang==='CBL' && f.parsed.cobol);
     if (!progs.length) return emptyState('⚡','No COBOL program found','Drop COBOL files to enable translation.');
     return progs.map(f=>{
-      const C = f.parsed.cobol;
-      return `<div class="card" style="max-width:700px;margin-bottom:14px">
-        <h3>⚡ ${esc(C.programId || f.name)}</h3>
-        <p class="note">Real v3 analysis: ${C.paragraphs.length} paragraph(s) · ${C.vars.length} data item(s) · ${C.copyUsed.length} COPY reference(s) · ${C.selects.length} SELECT · ${C.sql.length} SQL block(s) · ${C.calls.length} CALL</p>
-        <p class="note" style="color:var(--yellow)">AI translation is not implemented yet. The next phase will connect a model API and validate the generated Python (static checks + test scaffolding). No simulated output is shown, because none is produced.</p>
+      const T = translateCOBOL(f);
+      if (!T || T.error) return `<div class="card" style="max-width:760px;margin-bottom:14px">
+        <h3>⚡ ${esc(f.name)}</h3>
+        <p class="note" style="color:var(--red)">Translation error — nothing invented: ${esc((T && T.error) || 'unknown')}</p>
+      </div>`;
+      const s = T.stats;
+      const pct = Math.max(0, Math.min(100, s.coverage));
+      const bar = `<div style="background:#2a2f3a;border-radius:6px;height:8px;max-width:460px;margin:8px 0"><div style="width:${pct}%;height:8px;border-radius:6px;background:linear-gradient(90deg,#4ade80,#fbbf24)"></div></div>`;
+      const chips = `<span style="color:#4ade80">✅ translated ${s.translated}</span> · <span style="color:var(--yellow)">🟡 approximated ${s.approximated}</span> · <span style="color:var(--red)">⛔ not translated ${s.unsupported}</span>`;
+      const mapRows = T.stmts.slice(0, 250).map(x=>`<tr><td class="mono">${x.ln}</td><td class="mono">${x.py||'—'}</td><td>${esc(x.k)}</td><td>${x.status==='translated'?'✅':x.status==='approximated'?'🟡':'⛔'} ${esc(x.note||'')}</td></tr>`).join('');
+      const typeRows = T.types.map(t=>`<tr><td class="mono">${esc(t.name)}</td><td class="mono">${esc(t.pic)}</td><td class="mono">${esc(t.py)}</td><td>${esc(t.note||'')}</td></tr>`).join('');
+      const fi = state.files.indexOf(f);
+      return `<div class="card" style="max-width:760px;margin-bottom:14px">
+        <h3>⚡ ${esc(T.programId || f.name)} — weighted coverage ${pct}%</h3>
+        ${bar}
+        <p class="note">${chips}<br>Weighted coverage = (translated×1 + approximated×0.6) / total. ${s.total} statement(s), ${T.paras.length} paragraph(s). Every approximation is commented in the code; untranslated statements are marked <b>[NON TRADUIT]</b> — nothing is invented.</p>
+        <details><summary>📋 Translation report — line mapping COBOL → Python (status, notes)</summary>
+          <div style="overflow:auto;max-height:320px"><table style="width:100%;border-collapse:collapse;font-size:12px">
+          <tr style="text-align:left;color:var(--text2)"><th>COBOL ln</th><th>Python ln</th><th>verb</th><th>status</th></tr>${mapRows}</table></div>
+        </details>
+        <details><summary>🔤 Types — PIC → Python mapping (${T.types.length})</summary>
+          <div style="overflow:auto;max-height:260px"><table style="width:100%;border-collapse:collapse;font-size:12px">
+          <tr style="text-align:left;color:var(--text2)"><th>name</th><th>PIC</th><th>Python</th><th>note</th></tr>${typeRows}</table></div>
+        </details>
+        <div class="codeblock">${esc(T.python)}</div>
+        <button class="analyze-btn" style="width:auto" onclick="downloadPython(${fi})">⬇ Download .py</button>
       </div>`;
     }).join('');
   },
@@ -3258,14 +5329,26 @@ const PANELS = {
     const m = getModel();
     const byT = t=>[...m.nodes.values()].filter(n=>n.type===t).length;
     return `<div class="card" style="max-width:700px">
-      <h3>✦ AI System Explanation</h3>
+      <h3>✦ AI System Explanation — two clearly separated engines</h3>
       <p class="note" style="font-size:13px;line-height:1.7;color:var(--text2)">
-      Not implemented yet. The next phase will call a model API (with your locally-stored key, sessionStorage —
-      never sent to any server other than the model provider) and ground every answer in the real dependency graph:
-      ${byT('job')} job(s), ${byT('prog')} program(s), ${byT('cpy')} copybook(s), ${byT('ds')} dataset(s), ${byT('tbl')} DB2 table(s),
-      ${m.edges.length} relation(s) — with evidence lines and confidence levels. Answers will cite their sources;
-      anything unproven will be labeled as such. No hardcoded explanation is displayed, because none is generated.</p>
+      <b style="color:#4ade80">1. Deterministic engine — LIVE.</b> The COBOL → Python translator (⚡ view) is rule-based:
+      every statement gets a status (translated / approximated / unsupported), its source line and its Python line.
+      It never guesses: unknown statements are marked <b>[NON TRADUIT]</b>.</p>
+      <p class="note" style="font-size:13px;line-height:1.7;color:var(--text2)">
+      <b style="color:var(--yellow)">2. AI engine — OPT-IN, grounded, never simulated.</b> When you configure an endpoint + key, the AI receives
+      <b>only the deterministic extract</b> of the selected entity: facts, evidence lines (file + line + note), direct upstream/downstream with confidence,
+      and the explicit unknowns list. The prompt forbids inventing anything outside this context and requires citing evidence. Every AI answer is
+      labeled <b>« AI-PROPOSED »</b> and never merged with deterministic output. Without configuration, no call is made and no AI text is shown — honest offline mode.<br>
+      Facts available for grounding: ${byT('job')} job(s), ${byT('prog')} program(s), ${byT('cpy')} copybook(s), ${byT('ds')} dataset(s), ${byT('tbl')} DB2 table(s), ${m.edges.length} relation(s).</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:12px">
+        <input class="key-input" id="aiUrlInput" type="text" placeholder="https://api…/v1/chat/completions" style="min-width:280px" value="${esc(aiCfg().url)}" autocomplete="off">
+        <input class="key-input" id="aiModelInput" type="text" placeholder="model name" style="min-width:140px" value="${esc(aiCfg().model)}" autocomplete="off">
+        <button class="key-btn" onclick="aiSaveCfg()">Save endpoint</button>
+        <button class="key-btn" onclick="aiRun()">✦ Explain selection (AI)</button>
+      </div>
+      <p class="note">OpenAI-compatible <span class="mono">chat/completions</span> endpoint. Key and URL stay in your browser (sessionStorage); the only data sent is the built context of the selected entity — never your full files, never the key in prompts or telemetry. ${aiReady() ? '<span style="color:var(--green)">✓ AI configured</span>' : '<span style="color:var(--yellow)">AI off — deterministic mode</span>'}</p>
       <div style="margin-top:10px">${keyStatusHTML()}</div>
+      <div id="aiOut"></div>
     </div>`;
   },
 
@@ -3308,7 +5391,7 @@ const PANELS = {
       <div class="log">${state._testResults.map(t=>`<span class="${t.pass?'ok':'warn'}">${t.pass?'✓':'✗'} ${esc(t.name)}</span>`).join('<br>')}</div>
     </div>` : '';
     const v2Area = state._v2Results ? `<div class="card" style="max-width:760px;margin-bottom:14px">
-      <h3>V2 suite (FD/01, SQL, JCL, CICS, dead code, REXX/SORT, JCL finesse, encodings, XSS): ${state._v2Results.filter(t=>t.pass).length}/${state._v2Results.length} passed</h3>
+      <h3>V2 suite (FD/01, SQL, JCL, CICS, dead code, REXX/SORT, JCL finesse, encodings, duplicates, translation, impact/lineage/IMS/SORT-GDG/XJOB/AI/SCHED, XSS): ${state._v2Results.filter(t=>t.pass).length}/${state._v2Results.length} passed</h3>
       <div class="log">${state._v2Results.map(t=>`<span class="${t.pass?'ok':'warn'}">${t.pass?'✓':'✗'} ${esc(t.name)}</span>`).join('<br>')}</div>
     </div>` : '';
     const logArea = state.loaded ? `<div class="card log" style="max-width:760px">
@@ -3317,7 +5400,7 @@ const PANELS = {
     return `
     <div class="toolbar">
       <button class="analyze-btn" style="width:auto" onclick="state._testResults=runSelfTests();renderContent()">⚙ Engine self-tests</button>
-      <button class="analyze-btn" style="width:auto" onclick="state._v2Results=runV2Tests();renderContent()">⚙ V2 suite (FD/01, SQL, JCL, CICS, dead code, REXX/SORT, JCL finesse, encodings, XSS)</button>
+      <button class="analyze-btn" style="width:auto" onclick="state._v2Results=runV2Tests();renderContent()">⚙ V2 suite (FD/01, SQL, JCL, CICS, dead code, REXX/SORT, JCL finesse, encodings, duplicates, translation, impact/lineage/IMS/SORT-GDG/XJOB/AI/SCHED, XSS)</button>
       <button class="analyze-btn" style="width:auto" onclick="toggleTelemetry()">${telemetryOn() ? '📡 Telemetry ON (click to disable)' : '📡 Telemetry disabled'}</button>
     </div>
     ${testArea}
@@ -3325,18 +5408,29 @@ const PANELS = {
     ${logArea}
     <div class="card" style="max-width:760px;margin-top:14px"><h3>Known limits (documented, not hidden)</h3><p class="note" style="line-height:1.8">
       • Dynamic SQL (PREPARE/EXECUTE): statement text unknown → no table extracted, explicit warning.<br>
+      • Identifiers in double (never silently merged): same PROGRAM-ID in several COBOL files → distinct nodes (X, X#2), EXEC/CALL edges point to the first definition + warning; duplicate step names in a job → distinct nodes (S1, S1#2), backrefs by step name resolve to the first + warning; duplicate PROC (same file or across files) → later definition wins + warning.<br>
+      • In-stream data (DD \*/DD DATA): DD \* ends at // or /\*; DD DATA ends at /\* only (// lines are data); DLM='xx' coded → only the delimiter ends the data, // and /\* are data.<br>
+      • COBOL formats: fixed/free detected per file, >>SOURCE FORMAT switch supported mid-file, isolated numbered lines in free files handled; compiler directives (EJECT, SKIP1-3, TITLE, CBL/\*CBL, >>) ignored; stacked/nested programs (second PROGRAM-ID): analysis stops at the first program + warning — nothing attributed to the wrong program.<br>
+      • Data items: levels 01-49, 66 (RENAMES), 77, 78, 88 captured; OCCURS n / m TO n / DEPENDING ON captured; USAGE (COMP-3, BINARY…) recorded. m TO n without DEPENDING ON: bounds kept, size flagged unknown.<br>
+      • SQL: CTE (with column lists, recursive) excluded from tables; aliases never captured; qualified quoted identifiers ("SCH"."MY TABLE") supported; MERGE USING, TRUNCATE TABLE, DELETE FROM supported.<br>
       • Cataloged PROCs / INCLUDE members: resolved only if uploaded in the project.<br>
       • Literal continuation: resumed at the apostrophe; column 16-71 spaces of the first line are not re-padded.<br>
-      • EXEC CICS: FILE/DATASET (FCT), MAP, QUEUE (TSQ/TDQ), XCTL/LINK handled. FILE(variable) resolved only when the constant is traced in the code (MOVE 'X' TO var / level-88) → probable; unknown value → no edge. HANDLE CONDITION/AID paragraph targets and HANDLE ABEND PROGRAM handled. IGNORE CONDITION and DLI/IMS not analyzed — no relation invented.<br>
+      • EXEC CICS: FILE/DATASET (FCT), MAP, QUEUE (TSQ/TDQ), XCTL/LINK handled. FILE(variable) resolved only when the constant is traced in the code (MOVE 'X' TO var / level-88) → probable; unknown value → no edge. HANDLE CONDITION/AID paragraph targets and HANDLE ABEND PROGRAM handled. IGNORE CONDITION not analyzed. IMS DL/I (CALL 'CBLTDLI'/'ASMTDLI'): calls detected and displayed, op-code traced when it comes from a literal or a traced MOVE, PCB/SSA segment names are built at runtime — unknown offline, explicit warning, no relation invented.<br>
       • REXX: exec detected (.REX/.EXEC or /* REXX */), CALL 'literal' → program edge, datasets quoted → "references" edge with unknown access type (never claimed read/write). CALL via variable → warning, no invented edge. IKJEFT01: EXEC 'member' of SYSTSIN expanded only if the exec is uploaded. ADDRESS/host commands not analyzed.<br>
-      • SORT (DFSORT): SYSIN inline cards decoded (FIELDS=(p,l,type,order) or COPY, FORMAT=, SUM). INCLUDE/OMIT/INREC/OUTREC/OUTFIL recognized but not decoded. SYSIN from a dataset not uploaded → sort fields unknown (warning). ICEGENER not analyzed.<br>
+      • SORT (DFSORT): SYSIN inline cards decoded — FIELDS=(p,l,type,order) or COPY (SORT FIELDS=COPY or OPTION COPY), FORMAT=, SUM, INCLUDE/OMIT COND (simple forms, short form with FORMAT=, field-to-field compare, AND/OR joins, quoted literals with commas — recursive decode; any unknown sub-condition keeps the whole card raw, flagged not decoded), INREC/OUTREC BUILD/OVERLAY/FIELDS (simple items only), OUTFIL FNAMES/OUTDD (named DDs become known outputs of the step). Other OPTION parameters, RECORD, MODS, IFTHEN/FINDREP not decoded. SYSIN from a dataset not uploaded → sort fields unknown (warning). ICEGENER not analyzed.<br>
+      • GDG: relative generations (+1/0/−1) kept in DD evidence ('GDG +1' etc.); the base shares one node — after a same-job write (+1), a read (0) flows from the newly created generation, while an older read (−1 or less) is flagged by an explicit warning. The absolute generation number is unknown offline (catalog) — never guessed.<br>
+      • Cross-job: job→job « feed » edges are inferred ONLY from shared non-temporary datasets (write→read direction from DD usage). Real execution order across jobs is unknown offline (scheduler not analyzed): every feed edge is PROBABLE, and a reader of an older GDG generation is flagged explicitly. Unknown-usage DDs produce no inference. <b>Scheduler import</b>: drop a scheduler export (.sch/.sched, one declaration per line: <span class="mono">JOB B AFTER A,C</span>, # or * = comment) — declared orders are CERTAIN (evidence merged into dataset-inferred feeds), pairs without shared dataset get an order-only edge, declared-but-not-uploaded jobs and cycles are flagged, jobs without a scheduler line keep their PROBABLE/unknown status explicitly. Other scheduler formats (TWS current plan, Control-M XML, CA-7) are not parsed.<br>
+      • AI engine (opt-in): no call without your endpoint + key (stored locally in sessionStorage). The model receives only the deterministic context of the selected entity (facts, evidence, confidence, unknowns) — never your full files; the key never appears in prompts or telemetry. All AI output is labeled « AI-PROPOSED » and is a proposal, not ground truth. Unconfigured → honest offline deterministic mode.<br>
       • JCL IF/ELSE and EXEC COND=: captured and displayed with their condition, but the condition itself is NEVER evaluated (return codes unknown offline) — conditional steps are flagged, not skipped or simulated. RD/RERUN (restart): captured and flagged as informational; a restarted step may run twice, so run counts are never claimed.<br>
       • Warnings are sorted by severity: blocking (member/program missing, never called) first, then uncertainties (unknown value, dead code), then informational (restart, conditions). Stable within each level.<br>
       • Encodings: UTF-8 (with or without BOM), UTF-16 (BOM) and EBCDIC CP037 (printable subset) auto-detected at upload; unmapped EBCDIC bytes appear as ? (counted in the log). Other code pages (CP1140 accented, DBCS) are not converted — flagged, never guessed.<br>
       • Control report (HTML export): standalone audit document built from the live model — inventory, findings by severity, relation confidence, coverage and limits. Nothing filtered, everything escaped.<br>
       • PERFORM/GOTO to an undefined target: flagged as warning, no edge created.<br>
       • Dead code: paragraphs declared unreachable only when certain (no PERFORM/GO TO target, no fall-through path). DECLARATIVES/USE and ALTER disable the analysis (implicit/dynamic targets). Programs never called are flagged as questions, not facts (code not uploaded may call them).<br>
-      • AI: not implemented — no simulated output.<br>
+      • COBOL → Python translation (deterministic engine, ⚡ view): every statement carries a status — translated / approximated / unsupported — with its COBOL line and its Python line in the report. Approximations documented in code comments: GO TO → tail call (return f()), PERFORM UNTIL tests before each iteration (TEST AFTER not distinguished), PERFORM THRU calls paragraphs in order, float approximation for PIC V (round() used for ROUNDED with known decimals — validate monetary amounts), main() calls paragraphs in declared order (fall-through). File I/O and EXEC SQL/CICS are NOT translated: emitted as [NON TRADUIT] comments, nothing invented. GO TO/PERFORM to a dynamic target → not translated. Weighted coverage = (translated×1 + approximated×0.6)/total.<br>
+      • Lineage: per dataset, upstream sources (real in-edges with evidence) and a derived downstream section (each step that READS it, and the datasets that step writes — one hop, nothing invented). SORT steps show their decoded inline SYSIN cards (fields, SUM) as a transformation pill; SYSIN cards from a non-uploaded dataset stay unknown.<br>
+      • Impact: shortest path per impacted node, and when several distinct shortest paths exist they are ALL displayed (up to 3 per node — none hidden); confidence = weakest link along each path.<br>
+      • AI: not connected, never simulated — a future optional engine would be validated by the deterministic engine and labeled « AI-proposed » (see AI view).<br>
       • Telemetry (Google Analytics): ON by default — anonymized usage stats only, never source code, never analysis results. Disable anytime via the Debug button; choice persisted locally.</p></div>`;
   },
 };
