@@ -105,7 +105,10 @@
 
 <!-- ⚠️ HÉBERGEMENT : cette page = index.html, la maquette = reforge.html (lien relatif ci-dessous).
      Si la maquette vit dans un autre repo, remplacez "reforge.html" par son URL complète. -->
-<!-- index.html — landing page Reforge. CTA → reforge.html (maquette redesign). -->
+<!-- index.html — landing page Reforge. CTA → reforge.html (maquette redesign).
+     V3 : annonces alignées sur les capacités réelles et testées du moteur —
+     tout ce qui est listé « Resolved today » est couvert par un test automatisé ;
+     la roadmap ne garde que ce qui manque vraiment. -->
 
 <div class="wrap">
   <nav>
@@ -164,7 +167,7 @@
     <div class="values">
       <div class="value"><div class="v-icon v1">🗺</div><h3>What does this system do?</h3><p>An interactive system map rebuilt from your JCL and COBOL: jobs, programs, datasets, and how they connect — even if the last person who knew has retired.</p></div>
       <div class="value"><div class="v-icon v2">💥</div><h3>What breaks if I change it?</h3><p>Impact analysis and data lineage across jobs, steps and programs. Change a copybook, see exactly what to recompile and re-run — before you find out in production.</p></div>
-      <div class="value"><div class="v-icon v3">⚡</div><h3>How do I modernize it?</h3><p>AI-assisted COBOL → Python translation and plain-English system explanations, to accelerate understanding — not to blind-rewrite production code.</p></div>
+      <div class="value"><div class="v-icon v3">⚡</div><h3>How do I modernize it?</h3><p>A deterministic COBOL → Python translator — every statement carries a status and a comment, nothing is invented — plus optional AI explanations, to accelerate understanding, not to blind-rewrite production code.</p></div>
     </div>
   </section>
 
@@ -172,39 +175,45 @@
     <h2>Everything, out of the box</h2>
     <p class="sec-sub">Built for real mainframe estates, not textbook examples.</p>
     <div class="feats">
-      <div class="feat"><span class="f-ico">📂</span><div><b>Mixed formats, auto-detected</b><span>JCL, COBOL, copybooks, EBCDIC — drop them together, language is detected per file.</span></div></div>
-      <div class="feat"><span class="f-ico">🔀</span><div><b>Job &amp; program flows</b><span>Steps, PERFORM / CALL / GOTO paragraphs — visualized, not guessed.</span></div></div>
+      <div class="feat"><span class="f-ico">📂</span><div><b>Mixed formats, auto-detected</b><span>JCL, COBOL, copybooks, REXX, scheduler exports (.sched), EBCDIC — drop them together, language is detected per file.</span></div></div>
+      <div class="feat"><span class="f-ico">🔀</span><div><b>Job &amp; program flows</b><span>Steps, PERFORM / CALL / GOTO paragraphs — including numbered paragraphs (1000-CALC) — visualized, not guessed.</span></div></div>
       <div class="feat"><span class="f-ico">🗄</span><div><b>DB2 / SQL aware</b><span>Embedded SQL, cursors and table usage detected and traced.</span></div></div>
-      <div class="feat"><span class="f-ico">📋</span><div><b>Copybook resolution</b><span>Record layouts resolved across programs, with recompile impact.</span></div></div>
-      <div class="feat"><span class="f-ico">🔎</span><div><b>Data lineage</b><span>Follow any dataset from input to output across the whole system.</span></div></div>
+      <div class="feat"><span class="f-ico">📋</span><div><b>Copybook resolution</b><span>Record layouts resolved across programs (including REPLACING), with recompile impact.</span></div></div>
+      <div class="feat"><span class="f-ico">🔎</span><div><b>Data lineage</b><span>Follow any dataset from input to output across the whole system, with the evidence line behind every relation.</span></div></div>
       <div class="feat"><span class="f-ico">🔒</span><div><b>Zero data exposure</b><span>Everything runs client-side. Your code never leaves your browser.</span></div></div>
     </div>
   </section>
 
   <section id="coverage">
     <h2>What the parser resolves today</h2>
-    <p class="sec-sub">No marketing wish list — the exact constructs covered by the current version, and what's coming next.</p>
+    <p class="sec-sub">No marketing wish list — the exact constructs covered by the current version, and what's coming next. Everything listed on the left is covered by an automated regression test.</p>
     <div class="constructs">
       <div class="const-card done">
         <h3>✅ Resolved today</h3>
         <ul>
           <li><span class="mono">EXEC PGM</span> — job steps and program references (JCL)</li>
-          <li><span class="mono">DD DSN=</span> — datasets referenced by jobs (JCL)</li>
-          <li><span class="mono">PROGRAM-ID</span> — COBOL program identification</li>
-          <li><span class="mono">COPY</span> — copybook references and resolution</li>
-          <li><span class="mono">SELECT / FD</span> — COBOL file declarations</li>
-          <li><span class="mono">EXEC SQL … END-EXEC</span> — embedded SQL, cursors and table usage</li>
-          <li><span class="mono">PERFORM / CALL / GO TO</span> — paragraph-level flow</li>
+          <li><span class="mono">DD DSN=</span> — datasets with DISP direction, temporaries and backrefs (<span class="mono">*.STEP.DD</span>)</li>
+          <li><span class="mono">PROC</span> — in-stream and cataloged procedures (cataloged: resolved when the PROC file is uploaded), expanded with DD overrides (<span class="mono">//STEPNAME.DDNAME DD</span>) — the effective dataset is the one shown, unresolved overrides are flagged, never dropped silently</li>
+          <li><span class="mono">&amp;VAR</span> — symbolic parameters: PROC defaults, EXEC overrides and <span class="mono">SET</span>, resolved in DSNs (<span class="mono">&amp;CYCLE..CUST.MSTR</span>)</li>
+          <li>GDG — relative generations (<span class="mono">+1 / 0 / −1</span>) with I/O direction and explicit older-generation warnings</li>
+          <li><span class="mono">PROGRAM-ID</span>, <span class="mono">COPY</span> (incl. REPLACING), <span class="mono">SELECT / FD</span>, <span class="mono">EXEC SQL … END-EXEC</span> (cursors, MERGE, CTE), <span class="mono">PERFORM / CALL / GO TO</span></li>
+          <li>DFSORT cards — <span class="mono">FIELDS</span>, <span class="mono">SUM</span>, <span class="mono">INCLUDE/OMIT</span>, <span class="mono">INREC/OUTREC</span>, <span class="mono">OUTFIL</span></li>
+          <li>CICS command level — <span class="mono">FILE/FCT</span>, <span class="mono">MAP</span>, <span class="mono">QUEUE</span>, <span class="mono">XCTL/LINK</span>, <span class="mono">HANDLE</span></li>
+          <li>Scheduler import (<span class="mono">.sched</span>) — declared job order (<span class="mono">JOB B AFTER A</span>) → CERTAIN cross-job dependencies</li>
+          <li>Impact analysis, data lineage and dead code — evidence line and confidence for every relation</li>
+          <li>Encodings — EBCDIC CP037, UTF-16 and UTF-8 auto-detected per file</li>
+          <li>COBOL → Python translation — deterministic, line-by-line status report (translated / approximated / [NON TRADUIT]) and a structural execution-safety check before you run the .py</li>
         </ul>
       </div>
       <div class="const-card next">
-        <h3>🚧 On the roadmap</h3>
+        <h3>🚧 Not resolved yet (documented, not hidden)</h3>
         <ul>
-          <li>Cataloged procedures (<span class="mono">PROC</span> statements)</li>
-          <li>Symbolic parameters (<span class="mono">&amp;VAR</span>)</li>
-          <li>Generation Data Groups (GDG) resolution</li>
-          <li>CICS command-level analysis</li>
-          <li>Deeper data lineage (FD ↔ DD matching)</li>
+          <li>Other scheduler exports (TWS current plan, Control-M XML, CA-7) — only the <span class="mono">.sched</span> text format is parsed today</li>
+          <li>Dynamic targets (<span class="mono">PERFORM</span> / <span class="mono">GO TO</span> via variable, <span class="mono">ALTER</span>) — detected and flagged, never guessed</li>
+          <li>JCL <span class="mono">IF/ELSE</span> and <span class="mono">COND=</span> — captured and displayed with their condition, but never evaluated (return codes unknown offline)</li>
+          <li>Absolute GDG generation numbers (the catalog is not reachable from a browser)</li>
+          <li>Advanced DFSORT cards (<span class="mono">IFTHEN</span>, <span class="mono">FINDREP</span>, <span class="mono">MODS</span>) — kept raw, flagged not decoded</li>
+          <li>Executing the generated Python for real — today: deterministic translation plus a structural safety check; CPython execution stays with you</li>
         </ul>
       </div>
     </div>
@@ -216,7 +225,7 @@
     <div class="steps">
       <div class="stepc"><h3>Drop your files</h3><p>Export or copy any set of JCL, COBOL and copybook files. Reforge detects each language automatically.</p></div>
       <div class="stepc"><h3>Explore the map</h3><p>Browse the system map, flows, datasets and lineage. Assess the impact of any change in one click.</p></div>
-      <div class="stepc"><h3>Plan modernization</h3><p>Use AI explanations and COBOL → Python drafts to build a migration plan your team can actually defend.</p></div>
+      <div class="stepc"><h3>Plan modernization</h3><p>Use COBOL → Python drafts (statused line by line, with an execution-safety check) and optional AI explanations to build a migration plan your team can actually defend.</p></div>
     </div>
   </section>
 
@@ -233,7 +242,7 @@
       <h3>Your mainframe code is the crown jewels</h3>
       <p>That's why Reforge runs entirely in your browser. Files are parsed locally — nothing is uploaded, nothing is stored.</p>
       <p><b>Don't take our word for it:</b> load the page, disconnect your network, and the analysis still runs. Watch your browser's network tab while you work — it stays empty.</p>
-      <p><b>The AI features, when you enable them:</b> your code text is sent directly to Anthropic using your own API key — never to us, never to any other server. No key configured, no data ever leaves your machine.</p>
+      <p><b>The AI features, when you enable them:</b> a deterministic extract of the selected entity only — facts, evidence lines, confidence, never your full files — is sent directly to the AI provider you configure (any OpenAI-compatible endpoint) using your own API key. Never to us, never to any other server. No key configured, no data ever leaves your machine.</p>
     </div>
   </section>
 
