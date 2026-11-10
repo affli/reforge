@@ -170,7 +170,7 @@
 
   ::-webkit-scrollbar{width:9px;height:9px} ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:5px} ::-webkit-scrollbar-track{background:transparent}
 </style>
-<!-- Google Analytics telemetry: ON by default (anonymized usage only, never source code). Can be disabled via Debug → Telemetry button, choice persisted. -->
+<!-- Google Analytics telemetry: ON by default (usage events only — never source code, file names or analysis data; events go to Google and may be associated with browser/device identifiers). Can be disabled via Debug → Telemetry button, choice persisted. -->
 </head>
 <body>
 
@@ -179,7 +179,6 @@
 <header>
   <div class="logo">REFORGE<span>.io</span></div>
   <div class="header-tag">Legacy Analyzer</div>
-  <div class="badge-concept">REDESIGN CONCEPT</div>
   <div class="header-spacer"></div>
   <div class="status"><div class="dot"></div><span id="statusText">Ready</span></div>
   <a class="header-link" href="mailto:adrien@vyniad.be">adrien@vyniad.be</a>
@@ -1761,7 +1760,11 @@ function trStmt(toks, i, stops){
     }
     case 'STOP': { i++; if (trIsWord(toks[i], 'RUN')) i++; return { stmt: { k: 'STOP' }, i: toks.length }; }
     case 'GOBACK': { return { stmt: { k: 'STOP', via: 'GOBACK' }, i: toks.length }; }
-    case 'EXIT': { i++; if (trIsWord(toks[i], 'PROGRAM')) i++; return { stmt: { k: 'NOP', note: 'EXIT' }, i }; }
+    case 'EXIT': {
+      i++;
+      const isExitProg = trIsWord(toks[i], 'PROGRAM'); if (isExitProg) i++;
+      return { stmt: { k: 'NOP', note: isExitProg ? 'EXIT PROGRAM' : 'EXIT', exitProg: isExitProg }, i };
+    }
     case 'CONTINUE': { return { stmt: { k: 'NOP' }, i: i + 1 }; }
     case 'SET': {
       i++;
@@ -1955,7 +1958,7 @@ function trEmitStmt(out, st, ind, ctx){
       const tgtU = String(st.target || '').toUpperCase();
       if (ctx.paraSet.has(tgtU)){
         py('return ' + ((ctx.fnMap && ctx.fnMap.get(tgtU)) || pyIdent(st.target)) + '()  # GO TO: tail call — the target will return control to the PERFORMer');
-        rec('translated', 'GO TO translated as a tail call (return f()) — COBOL jump semantics approximated', 'goto');
+        rec('approximated', 'GO TO translated as a tail call (return f()): control returns to the CALLER of this paragraph — COBOL would fall through past the target paragraph. Exact only when the GO TO is the paragraph exit; verify any other case', 'goto');
       } else {
         py('raise RuntimeError("GO TO ' + tgtU + ': unknown target (dynamic) — not translated")');
         rec('unsupported', 'unknown target (dynamic)', 'goto');
@@ -2028,7 +2031,16 @@ function trEmitStmt(out, st, ind, ctx){
       break;
     }
     case 'NOP': {
-      rec('translated', st.note || null, 'nop');
+      if (st.exitProg){
+        // COBOL EXIT PROGRAM: in a CALLED subprogram it returns to the caller;
+        // in a main program it is a no-op (execution continues). Python `return`
+        // matches the subprogram case — the main-program case is a documented
+        // approximation, flagged.
+        py('return  # EXIT PROGRAM: returns to the caller (subprogram). In a MAIN program COBOL would continue — verify.');
+        rec('approximated', 'EXIT PROGRAM → return (exact for a called subprogram; no-op continuation in a main program not distinguished)', 'nop');
+      } else {
+        rec('translated', st.note || null, 'nop');
+      }
       break;
     }
     default: {
@@ -2136,18 +2148,68 @@ function translateCOBOL(f){
       push('def ' + fnMap.get(String(p.name).toUpperCase()) + '():');
       if (globalNames.length) push('    global ' + globalNames.join(', '));
       const before = out.lines.length;
-      p.stmts.forEach(st => trEmitStmt(out, st, '    ', ctx));
+      let unreach = false;
+      p.stmts.forEach(st => {
+        if (unreach){
+          // COBOL: nothing after an unconditional GO TO or STOP RUN/GOBACK in the
+          // same paragraph can ever run — emitted as a comment, never as live code
+          push('    # [unreachable after ' + (st.k === 'GOTO' ? 'GO TO' : 'STOP RUN/GOBACK') + '] ' + (st.k || 'statement') + ' — present in COBOL, not emitted as live Python');
+          out.flat.push({ para: ctx.curPara, ln: st.ln, k: 'unreachable', status: 'unsupported', conf: 1, py: out.lines.length, note: 'unreachable after unconditional transfer (GO TO / STOP RUN)' });
+          return;
+        }
+        trEmitStmt(out, st, '    ', ctx);
+        if (st.k === 'GOTO' || st.k === 'STOP') unreach = true;
+      });
       if (out.lines.length === before) push('    pass');
       push('');
     });
     ctx.curPara = null;
-    // _run entry (never "main": a COBOL MAIN paragraph must neither be
-    // overwritten nor call itself — real bug reported by a user)
+    // _run entry — generated from the REAL control flow, not declared order.
+    // (never "main": a COBOL MAIN paragraph must neither be overwritten nor
+    // call itself — real bug reported by a user). Simulation: start at the
+    // first paragraph; fall through to the next paragraph unless the last
+    // top-level statement is an unconditional transfer (STOP RUN/GOBACK ends
+    // the program, lone GO TO jumps). A GO TO nested in an IF/EVALUATE/inline
+    // PERFORM makes the fall-through uncertain → linear generation stops there
+    // with an explicit warning. Paragraphs never reached are NOT called
+    // (dead-code candidates — questions, not facts).
+    const paraU = paras.map(p => String(p.name).toUpperCase());
+    const idxOf = n => paraU.indexOf(String(n || '').toUpperCase());
+    const hasNestedGoto = p => p.stmts.some(s => s.k !== 'GOTO' && JSON.stringify(s).includes('"k":"GOTO"'));
+    const runSeq = [];
+    let runTrunc = null;
+    if (C._decl || C._alter){
+      runSeq.push(0);
+      runTrunc = (C._decl ? 'DECLARATIVES present (implicit targets)' : 'ALTER present (GO TO patched at run time)') + ' — only the first paragraph is called';
+    } else if (paras.length){
+      const seen = new Set();
+      let cur = 0;
+      while (cur >= 0 && cur < paras.length && !runTrunc){
+        if (seen.has(cur)){ runTrunc = 'backward jump (GO TO loop)'; break; }
+        seen.add(cur);
+        runSeq.push(cur);
+        if (hasNestedGoto(paras[cur])){ runTrunc = 'conditional GO TO (inside IF/EVALUATE/inline PERFORM) — fall-through uncertain'; break; }
+        const last = paras[cur].stmts[paras[cur].stmts.length - 1];
+        if (last && last.k === 'STOP') break;                    // STOP RUN / GOBACK: program ends
+        if (last && last.k === 'GOTO'){
+          const t = idxOf(last.target);
+          if (t < 0){ runTrunc = 'GO TO ' + (last.target || '?') + ': target not found'; break; }
+          cur = t; continue;                                     // unconditional jump
+        }
+        cur++;                                                   // fall-through
+      }
+    }
     push('def _run():');
-    push('    # COBOL starts at the first paragraph then falls through (fall-through).');
-    push('    # Approximation: each paragraph is called in declared order;');
-    push('    # STOP RUN exits (sys.exit); GO TO jumps back to its target.');
-    paras.forEach(p => push('    ' + fnMap.get(String(p.name).toUpperCase()) + '()'));
+    push('    # Entry point generated from the REAL COBOL control flow (not declared order):');
+    push('    # first paragraph, fall-through between paragraphs, GO TO jumps,');
+    push('    # STOP RUN/GOBACK ends. Paragraphs not on this path are NOT called');
+    push('    # (dead-code candidates — questions, not facts).');
+    runSeq.forEach(i => push('    ' + fnMap.get(paraU[i]) + '()'));
+    if (!runSeq.length) push('    pass');
+    if (runTrunc){
+      push('    # ⚠ flow stops here: ' + runTrunc + ' — the rest of the control flow is NOT generated; verify manually.');
+      ctx0.warns.push('entry point _run(): linear generation stopped (' + runTrunc + ') — remaining flow not generated, verify manually');
+    }
     push('');
     push("if __name__ == '__main__':");
     push('    _run()');
@@ -2185,8 +2247,33 @@ function translateCOBOL(f){
         ctx0.warns.push('variable ' + id + ' used but not declared in COBOL — declared in Python as ' + kind + ' (assumption commented in the .py, to verify)');
       });
       out.lines.splice(Math.max(di, 0), 0, ...decls);
-      // function bodies that assign it must declare it global
-      out.lines = out.lines.map(l => l.startsWith('    global ') ? l + ', ' + pyUndecl.join(', ') : l);
+      // function bodies that assign an undeclared variable must declare it
+      // global — otherwise Python makes it function-local → UnboundLocalError
+      // at run time (real bug: only functions that ALREADY had a global line
+      // were patched). Per-function pass: extend the existing global line or
+      // insert one, with ONLY the undeclared ids actually assigned there.
+      const reAssign = id => new RegExp('(^|[^\\w.])' + id + '(\\s*=(?!=)|\\s*\\+=|\\s*-=|\\s*\\*=|\\s*/=)');
+      for (let ix = 0; ix < out.lines.length; ix++){
+        if (!/^def \w+\(\):/.test(out.lines[ix])) continue;
+        const body = [];
+        for (let j = ix + 1; j < out.lines.length; j++){
+          if (/^(def |if __name__)/.test(out.lines[j])) break;
+          body.push(out.lines[j]);
+        }
+        const need = pyUndecl.filter(id => body.some(b => {
+          const ci = b.indexOf('#');
+          const code = ci >= 0 ? b.slice(0, ci) : b;
+          return reAssign(id).test(code);
+        }));
+        if (!need.length) continue;
+        if (body.length && body[0].startsWith('    global ')){
+          const parts = body[0].slice('    global '.length).split(',').map(s => s.trim()).filter(Boolean);
+          need.forEach(id => { if (!parts.includes(id)) parts.push(id); });
+          out.lines[ix + 1] = '    global ' + parts.join(', ');
+        } else {
+          out.lines.splice(ix + 1, 0, '    global ' + need.join(', '));
+        }
+      }
     }
 
     const flat = out.flat;
@@ -3909,7 +3996,7 @@ function runV2Tests(){
         '//DJ JOB 1',
         '//S1 EXEC PGM=CPY1',
         '//IN DD DATA',
-        'CARTE UN',
+        'CARD ONE',
         '// CARD TWO (data, not an end)',
         '/*',
         '//S2 EXEC PGM=CPY2',
@@ -3917,7 +4004,7 @@ function runV2Tests(){
       const s1 = r.jobs[0].steps.find(s => s.name === 'S1');
       const dd = s1 && s1.dds.find(d => d.ddname === 'IN');
       const s2 = r.jobs[0].steps.find(s => s.name === 'S2');
-      return dd && dd.inline && dd.inline.length === 2 && dd.inline[1].text.indexOf('// CARTE DEUX') === 0 && !!s2;
+      return dd && dd.inline && dd.inline.length === 2 && dd.inline[1].text.indexOf('// CARD TWO') === 0 && !!s2;
     })());
     T('V2 multi-JOB: 2 jobs in one file, same-name steps S1 of distinct jobs not merged', (() => {
       const r = parseJCL([
@@ -4797,7 +4884,7 @@ function runV2Tests(){
       const good = 'ws_a = 0\n\ndef _run():\n    ws_a = ws_a + 1\n\nif __name__ == "__main__":\n    _run()\n';
       const r4 = pyStaticCheck(good);
       return r1.issues.some(i => i.indexOf('defined MULTIPLE times') >= 0)
-        && r2.issues.some(i => i.indexOf('INFINIE') >= 0)
+        && r2.issues.some(i => i.indexOf('INFINITE') >= 0)
         && r3.issues.some(i => i.indexOf('never defined') >= 0)
         && r4.ok;
     })());
@@ -4951,6 +5038,98 @@ function runV2Tests(){
         && r.edgesAdded.every(e => e.ev && e.ev.length)
         && same.edgesAdded.length === 0 && same.edgesRemoved.length === 0
         && same.nodesAdded.length === 0 && same.nodesRemoved.length === 0;
+    })());
+    // Regression (bug fixed: _run used to call EVERY paragraph in declared order →
+    // double execution of PERFORMed paragraphs and side effects). The entry must now
+    // follow the REAL flow: MAIN-P performs INIT-P then STOP RUN → only main_p() is
+    // called; NEXT-P (after the STOP) is never called.
+    T('V2 V3 21.22: _run follows the real flow — no double execution, no dead-tail calls', (() => {
+      const src = 'IDENTIFICATION DIVISION.\nPROGRAM-ID. DBL.\nDATA DIVISION.\nWORKING-STORAGE SECTION.\n01 WS-COUNT PIC 9(4).\nPROCEDURE DIVISION.\nMAIN-P.\n    PERFORM INIT-P.\n    STOP RUN.\nINIT-P.\n    ADD 1 TO WS-COUNT.\nNEXT-P.\n    DISPLAY "X".';
+      const C = parseCOBOL('DBL.CBL', src, {});
+      const TR = translateCOBOL({ name:'DBL.CBL', text:src, parsed:{ cobol:C } });
+      if (TR.error) return false;
+      const m = TR.python.match(/def _run\(\):([\s\S]*)/);
+      if (!m) return false;
+      const body = m[1].split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).join('\n');
+      return /\bmain_p\(\)/.test(body)
+        && !/\binit_p\(\)/.test(body)      // INIT-P is PERFORMed INSIDE main_p — must NOT be called again by _run
+        && !/\bnext_p\(\)/.test(body)      // NEXT-P lies after STOP RUN — unreachable, must NOT be called
+        && /\binit_p\(\)/.test((TR.python.match(/def main_p\(\):([\s\S]*?)\n\n/)||['',''])[1]); // …but still called inside main_p
+    })());
+    T('V2 V3 21.23: _run truncates with explicit warning on uncertain flow (conditional GO TO)', (() => {
+      const src = 'IDENTIFICATION DIVISION.\nPROGRAM-ID. CGT.\nPROCEDURE DIVISION.\nP1.\n    IF X = 1 GO TO P3.\n    DISPLAY "A".\nP2.\n    DISPLAY "B".\nP3.\n    DISPLAY "C".';
+      const C = parseCOBOL('CGT.CBL', src, {});
+      const TR = translateCOBOL({ name:'CGT.CBL', text:src, parsed:{ cobol:C } });
+      if (TR.error) return false;
+      return /flow stops here: conditional GO TO/.test(TR.python) && TR.warns.some(w => w.includes('linear generation stopped'));
+    })());
+    // Regression (bug fixed: undeclared variables assigned in a function got NO
+    // `global` line when the function had none → UnboundLocalError at run time).
+    T('V2 V3 21.24: undeclared variable assigned in a function gets a global line', (() => {
+      const src = 'IDENTIFICATION DIVISION.\nPROGRAM-ID. UDV.\nPROCEDURE DIVISION.\nP1.\n    ADD 1 TO WS-CTR.\n    STOP RUN.';
+      const C = parseCOBOL('UDV.CBL', src, {});
+      const TR = translateCOBOL({ name:'UDV.CBL', text:src, parsed:{ cobol:C } });
+      if (TR.error) return false;
+      const fn = (TR.python.match(/def p1\(\):\n(    global [^\n]*\n)?([\s\S]*?)\n\n/) || ['', '', ''])[1] + '\n' + (TR.python.match(/def p1\(\):\n(    global [^\n]*\n)?([\s\S]*?)\n\n/) || ['', '', ''])[2];
+      return /    global [^\n]*\bws_ctr\b/.test(fn);
+    })());
+    // Regression (improvement: EXIT PROGRAM used to be a silent no-op — in a
+    // called subprogram control must return to the caller).
+    T('V2 V3 21.25: EXIT PROGRAM → return (approximated, documented)', (() => {
+      const src = 'IDENTIFICATION DIVISION.\nPROGRAM-ID. EXP.\nPROCEDURE DIVISION.\nP1.\n    EXIT PROGRAM.';
+      const C = parseCOBOL('EXP.CBL', src, {});
+      const TR = translateCOBOL({ name:'EXP.CBL', text:src, parsed:{ cobol:C } });
+      if (TR.error) return false;
+      return TR.python.includes('return  # EXIT PROGRAM') && TR.stmts.some(s => s.status === 'approximated');
+    })());
+    // Regression (improvement: statements after an unconditional GO TO / STOP RUN
+    // used to be emitted as live Python — unreachable code silently present).
+    T('V2 V3 21.26: statements after GO TO / STOP RUN emitted as comments, not live code', (() => {
+      const src = 'IDENTIFICATION DIVISION.\nPROGRAM-ID. URA.\nPROCEDURE DIVISION.\nP1.\n    GO TO P2.\n    DISPLAY "NEVER".\nP2.\n    STOP RUN.\n    DISPLAY "ALSO NEVER".';
+      const C = parseCOBOL('URA.CBL', src, {});
+      const TR = translateCOBOL({ name:'URA.CBL', text:src, parsed:{ cobol:C } });
+      if (TR.error) return false;
+      return (TR.python.match(/# \[unreachable after/g) || []).length === 2
+        && !/\n    print\("NEVER"\)/.test(TR.python)
+        && !/\n    print\("ALSO NEVER"\)/.test(TR.python);
+    })());
+    // DD DUMMY: no dataset behind the DD — no dataset edge may be created,
+    // and the other DDs of the step keep their real relations.
+    T('V2 JCL 21.27: DD DUMMY → no dataset edge, no invented dependency', (() => {
+      const JD = ['//DMY JOB 1', '//S1 EXEC PGM=PX', '//D1 DD DUMMY', '//D2 DD DSN=REAL.DS,DISP=SHR'].join('\n');
+      const mD = buildModel([{ name: 'D.JCL', lang: 'JCL', text: JD, parsed: { engine: 'v3', jobs: parseJCL(JD, {}).jobs, procs: {}, warnings: [] } }]);
+      const s1 = mD.edges.filter(e => e.f === 'step|DMY.S1' && e.k !== 'exec' && String(e.t).indexOf('ds|') === 0);
+      return s1.length === 1 && s1[0].t === 'ds|REAL.DS';
+    })());
+    // Cross-view consistency: Map, Lineage, Impact and Summary all render from
+    // the SAME model — a relation shown in one view must exist in the model
+    // with its evidence, and no view may show a relation the model lacks.
+    T('V2 CONSISTENCY 21.28: Map / Lineage / Impact / Summary read the same model relations', (() => {
+      const JT = ['//CNJ JOB (A),X', '//S1 EXEC PGM=CNP', '//IN DD DSN=CNS.IN,DISP=SHR', '//OUT DD DSN=CNS.OUT,DISP=(,CATLG)'].join('\n');
+      const CT = 'IDENTIFICATION DIVISION.\nPROGRAM-ID. CNP.\nENVIRONMENT DIVISION.\nINPUT-OUTPUT SECTION.\nFILE-CONTROL.\n    SELECT INF ASSIGN TO IN.\nDATA DIVISION.\nFILE SECTION.\nFD  INF.\n01  IREC PIC X(10).\nPROCEDURE DIVISION.\nP1.\n    OPEN INPUT INF.\n    READ INF.\n    STOP RUN.';
+      const filesC = [
+        { name: 'CN.JCL', lang: 'JCL', text: JT, parsed: { engine: 'v3', jobs: parseJCL(JT, {}).jobs, procs: {}, warnings: [] } },
+        { name: 'CNP.CBL', lang: 'CBL', text: CT, parsed: { cobol: parseCOBOL('CNP.CBL', CT, {}) } },
+      ];
+      const bakC = { files: state.files, loaded: state.loaded, entity: state.entity, group: state.group, sub: state.sub, _model: state._model };
+      try {
+        state.files = filesC; state.loaded = true; state._model = null; state.group = 'analyze';
+        const m = getModel();
+        const writeEdge = m.edges.find(e => e.f === 'step|CNJ.S1' && e.t === 'ds|CNS.OUT' && e.k === 'write');
+        state.sub = 'map'; renderContent();
+        const hMap = document.getElementById('content').innerHTML;
+        state.sub = 'lineage'; state.entity = 'ds|CNS.OUT'; renderContent();
+        const hLin = document.getElementById('content').innerHTML;
+        state.sub = 'impact'; state.entity = 'prog|CNP'; renderContent();
+        const hImp = document.getElementById('content').innerHTML;
+        state.sub = 'summary'; renderContent();
+        const hSum = document.getElementById('content').innerHTML;
+        return !!writeEdge && writeEdge.ev && writeEdge.ev.length > 0
+          && hMap.indexOf('CNS.IN') >= 0 && hMap.indexOf('CNS.OUT') >= 0
+          && hLin.indexOf('CNS.OUT') >= 0
+          && hImp.indexOf('CNS.OUT') >= 0
+          && hSum.indexOf('CNJ') >= 0;
+      } finally { state.files = bakC.files; state.loaded = bakC.loaded; state.entity = bakC.entity; state.group = bakC.group; state.sub = bakC.sub; state._model = bakC._model; }
     })());
   } catch (e){
     out.push({ name: 'V2 suite crashed: ' + e.message, pass: false });
@@ -5552,7 +5731,11 @@ async function saveSession(){
     });
     // ask the browser not to evict the data under disk pressure
     if (navigator.storage && navigator.storage.persist) { try { navigator.storage.persist(); } catch(e){} }
-  } catch(e){ _memSession = data; } // private mode / blocked storage → session memory
+  } catch(e){
+    _memSession = data; // private mode / blocked storage → session memory (not persisted)
+    if (e && (e.name === 'QuotaExceededError' || /quota/i.test(String((e && e.message) || ''))))
+      document.getElementById('statusText').textContent = '⚠ Local storage FULL — this session is kept in memory only and will NOT survive a reload. Export the project (.json) to keep it.';
+  }
 }
 
 async function loadSession(){
@@ -6277,11 +6460,11 @@ const PANELS = {
       • Control report (HTML export): standalone audit document built from the live model — inventory, findings by severity, relation confidence, coverage and limits. Nothing filtered, everything escaped.<br>
       • PERFORM/GOTO to an undefined target: flagged as warning, no edge created.<br>
       • Dead code: paragraphs declared unreachable only when certain (no PERFORM/GO TO target, no fall-through path). DECLARATIVES/USE and ALTER disable the analysis (implicit/dynamic targets). Programs never called are flagged as questions, not facts (code not uploaded may call them).<br>
-      • COBOL → Python translation (deterministic engine, ⚡ view): every statement carries a status — translated / approximated / unsupported — with its COBOL line and its Python line in the report. Approximations documented in code comments: GO TO → tail call (return f()), PERFORM UNTIL tests before each iteration (TEST AFTER not distinguished), PERFORM THRU calls paragraphs in order, float approximation for PIC V (round() used for ROUNDED with known decimals — validate monetary amounts), the entry point _run() calls paragraphs in declared order (fall-through) — paragraph functions are collision-checked (a paragraph MAIN never collides with the entry or a variable; renamed para_* when needed), variables used but not declared in COBOL are declared in Python with an explicit ⚠ comment (assumption visible, to verify), and pyStaticCheck flags structural execution hazards before you run the .py (duplicate defs, undefined call, never-assigned loop condition → infinite loop). File I/O and EXEC SQL/CICS are NOT translated: emitted as [NOT TRANSLATED] comments, nothing invented. GO TO/PERFORM to a dynamic target → not translated. Weighted coverage = (translated×1 + approximated×0.6)/total.<br>
+      • COBOL → Python translation (deterministic engine, ⚡ view): every statement carries a status — translated / approximated / unsupported — with its COBOL line and its Python line in the report. Approximations documented in code comments: GO TO → tail call (return f()), PERFORM UNTIL tests before each iteration (TEST AFTER not distinguished), PERFORM THRU calls paragraphs in order, float approximation for PIC V (round() used for ROUNDED with known decimals — validate monetary amounts), the entry point _run() is generated from the REAL control flow (first paragraph, fall-through between paragraphs, GO TO jumps, STOP RUN/GOBACK ends — paragraphs not on that path are NOT called: dead-code candidates; uncertain flow — conditional GO TO, DECLARATIVES, ALTER, backward jump — truncates the generated entry with an explicit warning) — paragraph functions are collision-checked (a paragraph MAIN never collides with the entry or a variable; renamed para_* when needed), variables used but not declared in COBOL are declared in Python with an explicit ⚠ comment (assumption visible, to verify), and pyStaticCheck flags structural execution hazards before you run the .py (duplicate defs, undefined call, never-assigned loop condition → infinite loop). File I/O and EXEC SQL/CICS are NOT translated: emitted as [NOT TRANSLATED] comments, nothing invented. GO TO/PERFORM to a dynamic target → not translated. Weighted coverage = (translated×1 + approximated×0.6)/total.<br>
       • Lineage: per dataset, upstream sources (real in-edges with evidence) and a derived downstream section (each step that READS it, and the datasets that step writes — one hop, nothing invented). SORT steps show their decoded inline SYSIN cards (fields, SUM) as a transformation pill; SYSIN cards from a non-uploaded dataset stay unknown.<br>
       • Impact: shortest path per impacted node, and when several distinct shortest paths exist they are ALL displayed (up to 3 per node — none hidden); confidence = weakest link along each path.<br>
       • AI: not connected, never simulated — a future optional engine would be validated by the deterministic engine and labeled « AI-proposed » (see AI view).<br>
-      • Telemetry (Google Analytics): ON by default — anonymized usage stats only, never source code, never analysis results. Disable anytime via the Debug button; choice persisted locally.</p></div>`;
+      • Telemetry (Google Analytics): ON by default — usage events only (view names, buttons used): never source code, never file names, never analysis results. The events are sent to Google and may be associated with your browser or device identifiers (this is standard Analytics behavior, not a guarantee of anonymity). Disable anytime via the Debug button; choice persisted locally.</p></div>`;
   },
 };
 
@@ -6431,7 +6614,9 @@ function loadSample(){
 
 // ── Telemetry (Google Analytics): ON by default, persistent opt-out ──
 // Loaded at boot; disable from Debug (localStorage 'reforge_telemetry' = '0').
-// Only anonymized usage events are sent — never source code.
+// Only usage events are sent (view names, buttons) — never source code,
+// file names or analysis data. Events go to Google and may be associated
+// with browser/device identifiers; no anonymity guarantee is claimed.
 function telemetryOn(){ try { return localStorage.getItem('reforge_telemetry') !== '0'; } catch(e){ return true; } }
 let gtagLoaded = false;
 function loadGtag(){
