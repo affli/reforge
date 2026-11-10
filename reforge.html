@@ -219,12 +219,12 @@
 // ── Navigation: 4 groups instead of 13 flat tabs ──
 const NAV = [
   { id:'explore',   icon:'🗺', label:'Explore',   subs:[ {id:'map',label:'System Map'}, {id:'flow',label:'Flow'}, {id:'programs',label:'Programs'}, {id:'data',label:'Data'} ] },
-  { id:'analyze',   icon:'🔬', label:'Analyze',  subs:[ {id:'impact',label:'Impact'}, {id:'lineage',label:'Data Lineage'}, {id:'db2',label:'DB2 / SQL'}, {id:'summary',label:'Summary'}, {id:'delta',label:'Version Diff'} ] },
+  { id:'analyze',   icon:'🔬', label:'Analyze',  subs:[ {id:'impact',label:'Impact'}, {id:'lineage',label:'Data Lineage'}, {id:'db2',label:'DB2 / SQL'}, {id:'summary',label:'Summary'}, {id:'delta',label:'Version Diff'}, {id:'history',label:'History'} ] },
   { id:'modernize', icon:'⚡', label:'Modernize', subs:[ {id:'python',label:'COBOL → Python',hot:true}, {id:'ai',label:'AI Explain',hot:true} ] },
   { id:'tech',      icon:'🛠', label:'Tech',      subs:[ {id:'source',label:'Source'}, {id:'copybooks',label:'Copybooks'}, {id:'debug',label:'Debug'} ] },
 ];
 
-const state = { files:[], loaded:false, log:[], group:'explore', sub:'map', entity:null, srcFile:null, pySel:null, srcIdx:null, _model:null, _testResults:null, delta:null };
+const state = { files:[], loaded:false, log:[], group:'explore', sub:'map', entity:null, srcFile:null, pySel:null, srcIdx:null, _model:null, _testResults:null, delta:null, history:[], histA:null, histB:null };
 
 // ══════════════════ 1. DETECTION & PARSING (real) ══════════════════
 
@@ -3402,9 +3402,65 @@ function getModel(){
       });
     }
     state._model = buildModel(state.files);
+    // ── Living graph: auto-snapshot after each (re)build. Deduplicated:
+    // a rebuild that changes nothing does not create a new version. ──
+    autoSnapshot();
   }
   return state._model;
 }
+
+// ══════════════════ LIVING GRAPH: versioned snapshots + diff over time ══════════════════
+// Every analysis build records a snapshot (nodes, relations, per-file content
+// hashes). The History panel diffs any two snapshots — the reviewer sees what
+// a change touched, with the same evidence rules as the rest of the tool.
+// Honest limits: rename detection is NOT attempted (a renamed dataset shows as
+// one removal + one addition); snapshots are content-derived, nothing invented.
+const HISTORY_CAP = 20; // oldest snapshots dropped; export the project to keep more
+function strHash(s){ let h = 5381; for (let i = 0; i < s.length; i++){ h = ((h << 5) + h + s.charCodeAt(i)) | 0; } return String(h); }
+function graphSnapshot(label){
+  const m = getModel();
+  const nodes = {};
+  m.nodes.forEach(n => { nodes[n.id] = { type: n.type, name: n.name }; });
+  const edges = {};
+  m.edges.forEach(e => { edges[e.f + '|' + e.t + '|' + e.k] = e.c; });
+  const fileHashes = {};
+  state.files.forEach(f => { fileHashes[f.name] = strHash(f.text || ''); });
+  return { label: label || '', ts: Date.now(),
+    counts: { nodes: m.nodes.size, edges: m.edges.length, warnings: (m.warnings || []).length },
+    nodes, edges, fileHashes };
+}
+function graphDiff(a, b){
+  const nodesAdded = [], nodesRemoved = [], edgesAdded = [], edgesRemoved = [], edgesChanged = [];
+  Object.keys(b.nodes).forEach(id => { if (!a.nodes[id]) nodesAdded.push({ id, name: b.nodes[id].name, type: b.nodes[id].type }); });
+  Object.keys(a.nodes).forEach(id => { if (!b.nodes[id]) nodesRemoved.push({ id, name: a.nodes[id].name, type: a.nodes[id].type }); });
+  Object.keys(b.edges).forEach(k => {
+    if (!a.edges[k]) edgesAdded.push(k);
+    else if (a.edges[k] !== b.edges[k]) edgesChanged.push({ k, from: a.edges[k], to: b.edges[k] });
+  });
+  Object.keys(a.edges).forEach(k => { if (!b.edges[k]) edgesRemoved.push(k); });
+  const filesChanged = Object.keys(b.fileHashes).filter(f => f in a.fileHashes && a.fileHashes[f] !== b.fileHashes[f]);
+  const filesAdded = Object.keys(b.fileHashes).filter(f => !(f in a.fileHashes));
+  const filesRemoved = Object.keys(a.fileHashes).filter(f => !(f in b.fileHashes));
+  return { nodesAdded, nodesRemoved, edgesAdded, edgesRemoved, edgesChanged, filesChanged, filesAdded, filesRemoved };
+}
+function autoSnapshot(){
+  const snap = graphSnapshot();
+  const last = state.history[state.history.length - 1];
+  if (last && JSON.stringify(last.fileHashes) === JSON.stringify(snap.fileHashes)
+           && last.counts.nodes === snap.counts.nodes && last.counts.edges === snap.counts.edges) return last;
+  snap.label = 'v' + (state.history.length + 1);
+  state.history.push(snap);
+  if (state.history.length > HISTORY_CAP) state.history.shift();
+  return snap;
+}
+function takeSnapshot(label){
+  const snap = graphSnapshot(label || 'manual');
+  snap.label = label || ('v' + (state.history.length + 1) + ' (manual)');
+  state.history.push(snap);
+  if (state.history.length > HISTORY_CAP) state.history.shift();
+  return snap;
+}
+function clearHistory(){ state.history = []; state.histA = null; state.histB = null; }
 
 // UI helpers (graph)
 function nodeLabel(id){ const n = getModel().nodes.get(id); return n ? n.name : id; }
@@ -5131,6 +5187,68 @@ function runV2Tests(){
           && hSum.indexOf('CNJ') >= 0;
       } finally { state.files = bakC.files; state.loaded = bakC.loaded; state.entity = bakC.entity; state.group = bakC.group; state.sub = bakC.sub; state._model = bakC._model; }
     })());
+
+    // ── 21.29 Living graph: auto-snapshot on build, deduplicated ──
+    T('V2 HISTORY 21.29: getModel creates a snapshot; identical rebuild does not duplicate', (() => {
+      const JT = ['//HJ JOB (A),X', '//S1 EXEC PGM=HGP', '//IN DD DSN=H.IN,DISP=SHR'].join('\n');
+      const CT = 'IDENTIFICATION DIVISION.\nPROGRAM-ID. HGP.\nPROCEDURE DIVISION.\nP1.\n    STOP RUN.';
+      const filesH = [
+        { name: 'H.JCL', lang: 'JCL', text: JT, parsed: { engine: 'v3', jobs: parseJCL(JT, {}).jobs, procs: {}, warnings: [] } },
+        { name: 'HGP.CBL', lang: 'CBL', text: CT, parsed: { cobol: parseCOBOL('HGP.CBL', CT, {}) } },
+      ];
+      const bakH = { files: state.files, loaded: state.loaded, _model: state._model, history: state.history, histA: state.histA, histB: state.histB };
+      try {
+        state.files = filesH; state.loaded = true; state._model = null; state.history = [];
+        const m = getModel();
+        const ok1 = state.history.length === 1 && state.history[0].counts.nodes === m.nodes.size && state.history[0].counts.edges === m.edges.length;
+        state._model = null; getModel(); // identical rebuild → dedup
+        const ok2 = state.history.length === 1;
+        return ok1 && ok2;
+      } finally { state.files = bakH.files; state.loaded = bakH.loaded; state._model = bakH._model; state.history = bakH.history; state.histA = bakH.histA; state.histB = bakH.histB; }
+    })());
+
+    // ── 21.30 Living graph: diff detects node/edge/file changes, honest renames ──
+    T('V2 HISTORY 21.30: graphDiff detects added/removed relations and changed file; rename = remove+add', (() => {
+      const mk = (dsn) => {
+        const JT = ['//HJ2 JOB (A),X', '//S1 EXEC PGM=HGD', '//IN DD DSN=' + dsn + ',DISP=SHR'].join('\n');
+        return [{ name: 'H2.JCL', lang: 'JCL', text: JT, parsed: { engine: 'v3', jobs: parseJCL(JT, {}).jobs, procs: {}, warnings: [] } }];
+      };
+      const s1 = (() => { const bak = { files: state.files, _model: state._model, history: state.history };
+        try { state.files = mk('OLD.DSN'); state._model = null; state.history = []; getModel(); return state.history[0]; }
+        finally { state.files = bak.files; state._model = bak._model; state.history = bak.history; } })();
+      const s2 = (() => { const bak = { files: state.files, _model: state._model, history: state.history };
+        try { state.files = mk('NEW.DSN'); state._model = null; state.history = []; getModel(); return state.history[0]; }
+        finally { state.files = bak.files; state._model = bak._model; state.history = bak.history; } })();
+      const d = graphDiff(s1, s2);
+      return d.edgesRemoved.length === 1 && d.edgesAdded.length === 1
+        && d.edgesRemoved[0].indexOf('ds|OLD.DSN') >= 0 && d.edgesAdded[0].indexOf('ds|NEW.DSN') >= 0
+        && d.filesChanged.length === 1 && d.filesChanged[0] === 'H2.JCL'
+        && d.nodesRemoved.some(n => n.id === 'ds|OLD.DSN') && d.nodesAdded.some(n => n.id === 'ds|NEW.DSN');
+    })());
+
+    // ── 21.31 History panel renders + cap at HISTORY_CAP ──
+    T('V2 HISTORY 21.31: History panel renders diff of two snapshots; history capped at ' + HISTORY_CAP, (() => {
+      const bakH = { history: state.history, histA: state.histA, histB: state.histB, loaded: state.loaded, group: state.group, sub: state.sub };
+      try {
+        state.history = []; state.histA = null; state.histB = null;
+        const base = { nodes: { 'job|J1': { type: 'job', name: 'J1' }, 'prog|P1': { type: 'prog', name: 'P1' } }, edges: { 'job|J1|prog|P1|runs|certain': 'certain' }, fileHashes: { A: '1' }, counts: { nodes: 2, edges: 1, warnings: 0 }, label: '', ts: 0 };
+        for (let i = 0; i < HISTORY_CAP + 5; i++){
+          const s = JSON.parse(JSON.stringify(base));
+          s.label = 'v' + (i + 1); s.ts = 1000 + i;
+          s.nodes['ds|D' + i] = { type: 'ds', name: 'D' + i };
+          s.edges['step|S|ds|D' + i + '|write'] = 'certain';
+          s.counts.nodes = 3 + i; s.counts.edges = 2 + i;
+          state.history.push(s);
+        }
+        if (state.history.length !== HISTORY_CAP + 5) return false;
+        state.loaded = true; state.group = 'analyze'; state.sub = 'history';
+        renderContent();
+        const h = document.getElementById('content').innerHTML;
+        // panel shows the cap, the two selects, and a non-trivial diff (B latest vs A before it)
+        return h.indexOf('History') >= 0 && h.indexOf('Snapshot now') >= 0
+          && h.indexOf('new entitie') >= 0 && h.indexOf('D' + (HISTORY_CAP + 4)) >= 0;
+      } finally { state.history = bakH.history; state.histA = bakH.histA; state.histB = bakH.histB; state.loaded = bakH.loaded; state.group = bakH.group; state.sub = bakH.sub; }
+    })());
   } catch (e){
     out.push({ name: 'V2 suite crashed: ' + e.message, pass: false });
   } finally {
@@ -5721,7 +5839,7 @@ function idbOpen(){
 }
 
 async function saveSession(){
-  const data = { v: SESSION_VER, ts: Date.now(), files: state.files, log: state.log, loaded: state.loaded };
+  const data = { v: SESSION_VER, ts: Date.now(), files: state.files, log: state.log, loaded: state.loaded, history: state.history };
   try {
     const db = await idbOpen();
     await new Promise((res, rej) => {
@@ -6273,6 +6391,40 @@ const PANELS = {
     </div>`;
   },
 
+  history: () => {
+    const intro = `<div class="card" style="max-width:900px"><h3>🕰 History — the living graph</h3>
+      <p class="note" style="font-size:13px;line-height:1.6;color:var(--text2)">Each analysis build is recorded as a versioned snapshot (entities, relations, per-file content hashes). Select two snapshots to see what a change touched over time. Snapshots are derived from loaded content only — nothing is inferred. Limits: rename detection is not attempted (a renamed dataset = one removal + one addition); the last ${HISTORY_CAP} snapshots are kept; snapshots live in the local session, export the project to keep the files.</p></div>`;
+    if (!state.history.length)
+      return `${intro}<div class="card" style="max-width:680px"><p class="note">No snapshot yet — they are created automatically each time the analysis is (re)built after a file change.</p></div>`;
+    const H = state.history;
+    if (state.histA == null) state.histA = Math.max(0, H.length - 2);
+    if (state.histB == null) state.histB = H.length - 1;
+    const fmt = s => new Date(s.ts).toLocaleString();
+    const sel = (key, idx) => `<select onchange="state.${key}=+this.value;renderContent()" style="background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:6px;padding:6px">` +
+      H.map((s,i)=>`<option value="${i}" ${i===idx?'selected':''}>${esc(s.label)} — ${fmt(s)} (${s.counts.nodes}n/${s.counts.edges}e)</option>`).join('') + '</select>';
+    const a = H[state.histA] || H[0], b = H[state.histB] || H[H.length-1];
+    let body = `<div class="card" style="max-width:900px"><h3>Snapshots (${H.length}, oldest dropped beyond ${HISTORY_CAP})</h3>
+      <table class="tbl"><tr><th>Version</th><th>When</th><th>Entities</th><th>Relations</th><th>Warnings</th></tr>
+      ${H.map((s,i)=>`<tr><td class="mono">${esc(s.label)}${i===H.length-1?' <span class="note">(latest)</span>':''}</td><td>${fmt(s)}</td><td>${s.counts.nodes}</td><td>${s.counts.edges}</td><td>${s.counts.warnings}</td></tr>`).join('')}</table></div>
+      <div class="card" style="max-width:900px"><h3>Δ Compare</h3>
+      <p>A: ${sel('histA', state.histA)} &nbsp; B: ${sel('histB', state.histB)}</p>`;
+    if (a && b && a !== b){
+      const d = graphDiff(a, b);
+      const chips = (arr, color) => arr.length ? arr.map(x => `<span class="mono pill" style="border:1px solid ${color};color:${color}">${esc(typeof x === 'string' ? x.split('|').slice(1).join(' · ') : x.name + ' (' + x.type + ')')}</span>`).join(' ') : '<span class="note">none</span>';
+      body += `<p class="note">${d.nodesAdded.length} new entitie(s) · ${d.nodesRemoved.length} removed · ${d.edgesAdded.length} new relation(s) · ${d.edgesRemoved.length} removed · ${d.edgesChanged.length} confidence change(s)</p>
+        <p><b style="color:var(--green)">+ Entities:</b> ${chips(d.nodesAdded, 'var(--green)')}</p>
+        <p><b style="color:var(--red)">− Entities:</b> ${chips(d.nodesRemoved, 'var(--red)')}</p>
+        <p><b style="color:var(--green)">+ Relations:</b> ${chips(d.edgesAdded, 'var(--green)')}</p>
+        <p><b style="color:var(--red)">− Relations:</b> ${chips(d.edgesRemoved, 'var(--red)')}</p>
+        ${d.edgesChanged.length ? `<p><b>⚠ Confidence changed:</b> ${d.edgesChanged.map(c => `<span class="mono">${esc(c.k.split('|').slice(1).join(' · '))}</span> ${esc(c.from)}→${esc(c.to)}`).join(' · ')}</p>` : ''}
+        <p><b>Files changed:</b> ${d.filesChanged.length ? d.filesChanged.map(f => `<span class="mono pill" style="border:1px solid var(--yellow);color:var(--yellow)">${esc(f)}</span>`).join(' ') : '<span class="note">none</span>'}
+        ${d.filesAdded.length ? ` · added: ${d.filesAdded.map(f=>`<span class="mono">${esc(f)}</span>`).join(', ')}` : ''}${d.filesRemoved.length ? ` · removed: ${d.filesRemoved.map(f=>`<span class="mono">${esc(f)}</span>`).join(', ')}` : ''}</p>`;
+    } else body += '<p class="note">Select two different snapshots to compute the diff.</p>';
+    body += `</div><div style="margin-top:10px"><button class="analyze-btn" style="width:auto" onclick="takeSnapshot();renderContent()">📌 Snapshot now</button>
+      <button class="analyze-btn" style="width:auto;background:var(--bg3)" onclick="clearHistory();renderContent()">🗑 Clear history</button></div>`;
+    return intro + body;
+  },
+
   delta: () => {
     const d = state.delta;
     const dl = id => { const p = String(id).split('|'); return p.length > 1 ? p[1] : id; };
@@ -6682,6 +6834,7 @@ if (location.search.indexOf('selftest') >= 0){
   if (saved && saved.v === SESSION_VER && Array.isArray(saved.files) && saved.files.length){
     state.files = saved.files;
     state.log = saved.log || [];
+    state.history = Array.isArray(saved.history) ? saved.history : [];
     state.loaded = !!saved.loaded;
     state.entity = null; state.srcFile = null; state.pySel = null;
     if (state.loaded){
