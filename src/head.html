@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reforge — Redesign Concept</title>
+<style>
+  :root{
+    --bg:#080b14; --bg2:#0d1120; --bg3:#141828; --bg4:#1a2035;
+    --border:#1e2540; --border2:#28304e;
+    --text:#e2e6f3; --text2:#8892b0; --text3:#4a5270;
+    --accent:#4f8fff; --accent2:#2563eb; --purple:#8b5cf6; --cyan:#22d3ee;
+    --green:#34d399; --yellow:#fbbf24; --red:#f87171;
+    --grad:linear-gradient(135deg,#4f8fff,#8b5cf6);
+  }
+  body.light{
+    --bg:#f0f2f9; --bg2:#fff; --bg3:#e8eaf5; --bg4:#dde0f0;
+    --border:#d0d5ea; --border2:#b8bdda;
+    --text:#0e1120; --text2:#3d456a; --text3:#8890aa;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:system-ui,-apple-system,'Segoe UI',sans-serif;
+    background:var(--bg); color:var(--text);
+    height:100vh; display:flex; flex-direction:column; overflow:hidden;
+    font-size:14px; -webkit-font-smoothing:antialiased;
+  }
+  .mono{font-family:ui-monospace,'Cascadia Code',Menlo,Consolas,monospace}
+
+  /* ── HEADER ── */
+  header{
+    display:flex; align-items:center; gap:12px; padding:0 20px; height:54px;
+    background:var(--bg2); border-bottom:1px solid var(--border);
+    flex-shrink:0; position:relative; z-index:10;
+  }
+  header::after{content:''; position:absolute; bottom:0; left:0; right:0; height:1px; background:var(--grad); opacity:.5}
+  .logo{font-family:ui-monospace,Menlo,monospace; font-size:17px; font-weight:700; background:var(--grad); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text}
+  .logo span{opacity:.55; font-weight:400}
+  .header-tag{font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--text2); border:1px solid var(--border2); border-radius:4px; padding:2px 8px}
+  .badge-concept{font-family:ui-monospace,Menlo,monospace; font-size:10px; color:var(--purple); border:1px dashed var(--purple); border-radius:4px; padding:2px 8px; letter-spacing:1px}
+  .header-spacer{flex:1}
+  .status{display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text2)}
+  .dot{width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 6px var(--green)}
+  .header-link{color:var(--text2); font-size:12px; text-decoration:none}
+  .header-link:hover{color:var(--accent)}
+  .theme-btn{background:var(--bg3); color:var(--text); border:1px solid var(--border2); border-radius:6px; padding:5px 10px; cursor:pointer; font-size:13px}
+
+  /* ── WORKSPACE ── */
+  .workspace{flex:1; display:grid; grid-template-columns:270px 1fr; min-height:0}
+
+  /* Left panel */
+  .left{background:var(--bg2); border-right:1px solid var(--border); padding:14px; display:flex; flex-direction:column; gap:12px; overflow-y:auto}
+  .panel-h{font-family:ui-monospace,Menlo,monospace; font-size:11px; letter-spacing:2px; text-transform:uppercase; color:var(--text3)}
+  .dropzone{
+    border:1.5px dashed var(--border2); border-radius:10px; padding:18px 12px;
+    text-align:center; color:var(--text2); transition:.15s; cursor:pointer; font-size:13px;
+  }
+  .dropzone:hover,.dropzone.hover{border-color:var(--accent); color:var(--text); background:rgba(79,143,255,.05)}
+  .dropzone .icon{font-size:22px; display:block; margin-bottom:6px}
+  .browse{color:var(--accent); text-decoration:underline}
+  .sample-btn{
+    width:100%; padding:10px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600;
+    color:#fff; background:var(--grad); border:none; transition:.15s;
+  }
+  .sample-btn:hover{filter:brightness(1.12)}
+  .analyze-btn{
+    width:100%; padding:9px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:600;
+    background:var(--bg3); color:var(--text); border:1px solid var(--border2); transition:.15s;
+  }
+  .analyze-btn:hover:not(:disabled){border-color:var(--accent)}
+  .analyze-btn:disabled{opacity:.4; cursor:not-allowed}
+  .file-list{display:flex; flex-direction:column; gap:6px}
+  .file{display:flex; align-items:center; gap:8px; background:var(--bg3); border:1px solid var(--border); border-radius:7px; padding:7px 9px; font-size:12px}
+  .file .ficon{flex-shrink:0}
+  .file .fname{font-family:ui-monospace,Menlo,monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0}
+  .lang{font-family:ui-monospace,Menlo,monospace; font-size:9px; font-weight:700; border-radius:3px; padding:2px 5px; flex-shrink:0}
+  .lang-jcl{color:var(--cyan); border:1px solid var(--cyan)}
+  .lang-cbl{color:var(--accent); border:1px solid var(--accent)}
+  .lang-cpy{color:var(--yellow); border:1px solid var(--yellow)}
+  .lang-txt{color:var(--text2); border:1px solid var(--border2)}
+  .rm{background:none; border:none; color:var(--text3); cursor:pointer; font-size:15px; line-height:1; padding:0 4px; border-radius:4px; flex-shrink:0}
+  .rm:hover{color:var(--red); background:rgba(248,113,113,.12)}
+  .clear-btn{background:none; border:none; color:var(--text3); font-size:11px; cursor:pointer; text-align:left; padding:0; text-decoration:underline}
+  .clear-btn:hover{color:var(--red)}
+  .stat-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px}
+  .stat{background:var(--bg3); border:1px solid var(--border); border-radius:8px; padding:8px 10px}
+  .stat b{display:block; font-size:18px; font-family:ui-monospace,Menlo,monospace}
+  .stat span{font-size:11px; color:var(--text2)}
+
+  /* Right panel */
+  .right{display:flex; flex-direction:column; min-width:0; min-height:0}
+  .groups{display:flex; gap:6px; padding:10px 16px 0; border-bottom:1px solid var(--border); background:var(--bg2)}
+  .group{
+    padding:8px 16px; font-size:13px; font-weight:600; color:var(--text2); cursor:pointer;
+    border:1px solid transparent; border-bottom:none; border-radius:8px 8px 0 0; position:relative; top:1px;
+    display:flex; align-items:center; gap:7px;
+  }
+  .group:hover{color:var(--text)}
+  .group.active{color:var(--text); background:var(--bg); border-color:var(--border)}
+  .group.active .g-icon{opacity:1}
+  .g-icon{font-size:13px; opacity:.7}
+  .subtabs{display:flex; gap:2px; padding:9px 16px; background:var(--bg); border-bottom:1px solid var(--border); flex-wrap:wrap}
+  .subtab{padding:6px 13px; font-size:12.5px; color:var(--text2); cursor:pointer; border-radius:6px; border:1px solid transparent}
+  .subtab:hover{color:var(--text); background:var(--bg3)}
+  .subtab.active{color:var(--accent); background:rgba(79,143,255,.08); border-color:rgba(79,143,255,.3); font-weight:600}
+  .subtab.hot{color:var(--purple)}
+  .content{flex:1; overflow:auto; padding:18px}
+
+  /* Empty state */
+  .empty{height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; color:var(--text2)}
+  .empty .e-icon{font-size:34px; margin-bottom:10px; opacity:.6}
+  .empty .e-title{font-size:16px; font-weight:600; color:var(--text); margin-bottom:6px}
+  .empty .e-sub{font-size:13px; max-width:380px; line-height:1.5}
+  .empty .e-hint{margin-top:16px; font-size:12px; color:var(--text3)}
+
+  /* Generic cards */
+  .card{background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px}
+  .card h3{font-size:13px; margin-bottom:8px; color:var(--text)}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  table.tbl{width:100%; border-collapse:collapse; font-size:12.5px}
+  table.tbl th{text-align:left; font-family:ui-monospace,Menlo,monospace; font-size:10.5px; letter-spacing:1px; text-transform:uppercase; color:var(--text3); padding:6px 8px; border-bottom:1px solid var(--border2)}
+  table.tbl td{padding:7px 8px; border-bottom:1px solid var(--border); color:var(--text2)}
+  table.tbl td:first-child{color:var(--text); font-family:ui-monospace,Menlo,monospace; font-size:12px}
+  .pill{font-family:ui-monospace,Menlo,monospace; font-size:10px; border-radius:4px; padding:2px 7px}
+  .pill-io{color:var(--text2); border:1px solid var(--border2)}
+
+  /* Map */
+  .toolbar{display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap}
+  .toolbar input{background:var(--bg3); border:1px solid var(--border2); color:var(--text); border-radius:6px; padding:6px 10px; font-size:12.5px; width:200px}
+  .legend{display:flex; gap:12px; font-size:11px; color:var(--text2); margin-left:auto}
+  .legend i{display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:4px}
+  .svgwrap{background:var(--bg2); border:1px solid var(--border); border-radius:10px; overflow:hidden}
+  .node rect{stroke-width:1.5}
+  .node text{font-family:ui-monospace,Menlo,monospace; font-size:11px; fill:var(--text)}
+  .node .ntype{font-size:8.5px; letter-spacing:1px; fill:var(--text2)}
+  .edge{stroke:var(--border2); stroke-width:1.2; fill:none}
+
+  /* Flow steps */
+  .step-body{margin-bottom:14px}
+  .step-head{font-family:ui-monospace,Menlo,monospace; font-size:13px; font-weight:700; color:var(--accent)}
+  .step-sub{font-size:12px; color:var(--text2); margin-top:3px; line-height:1.5}
+
+  /* Code viewer */
+  .codeblock{background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:14px; overflow:auto; font-family:ui-monospace,Menlo,monospace; font-size:12px; line-height:1.6; white-space:pre}
+  .k{color:var(--purple)} .c{color:var(--text3)} .s{color:var(--green)} .n{color:var(--yellow)}
+  .code-cols{display:grid; grid-template-columns:1fr 1fr; gap:14px; min-width:0}
+  .code-cols .codeblock{min-height:220px}
+  .note{font-size:11.5px; color:var(--text2); margin-top:8px}
+  .note b{color:var(--yellow)}
+  .key-panel{display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:10px; padding:30px 20px; color:var(--text2); border:1.5px dashed var(--border2); border-radius:10px}
+  .key-panel .kp-icon{font-size:28px}
+  .key-panel p{font-size:12.5px; max-width:320px; line-height:1.6}
+  .key-input{background:var(--bg3); border:1px solid var(--border2); color:var(--text); border-radius:6px; padding:8px 12px; font-size:12.5px; width:min(280px,100%); font-family:ui-monospace,Menlo,monospace}
+  .key-input:focus{outline:none; border-color:var(--accent)}
+  .key-btn{background:var(--grad); color:#fff; border:none; border-radius:6px; padding:8px 14px; font-size:12px; font-weight:600; cursor:pointer}
+  .key-btn:hover{filter:brightness(1.12)}
+  .key-btn-subtle{background:var(--bg3); color:var(--text2); border:1px solid var(--border2); border-radius:6px; padding:8px 14px; font-size:12px; cursor:pointer}
+
+  /* Impact */
+  .impact-left{display:flex; flex-direction:column; gap:4px}
+  .entity{padding:8px 10px; border-radius:7px; font-family:ui-monospace,Menlo,monospace; font-size:12px; cursor:pointer; color:var(--text2); border:1px solid transparent}
+  .entity:hover{background:var(--bg3)}
+  .entity.sel{background:rgba(79,143,255,.08); color:var(--accent); border-color:rgba(79,143,255,.3)}
+  .impact-arrow{color:var(--text3); font-size:12px; padding:5px 0}
+  .entity-row{padding:7px 10px; border-radius:7px; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--text)}
+
+  /* Log */
+  .log{font-family:ui-monospace,Menlo,monospace; font-size:11.5px; line-height:1.8; color:var(--text2)}
+  .log .ok{color:var(--green)} .log .warn{color:var(--yellow)} .log .info{color:var(--accent)}
+
+  ::-webkit-scrollbar{width:9px;height:9px} ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:5px} ::-webkit-scrollbar-track{background:transparent}
+</style>
+<!-- Google Analytics telemetry: ON by default (usage events only — never source code, file names or analysis data; events go to Google and may be associated with browser/device identifiers). Can be disabled via Debug → Telemetry button, choice persisted. -->
+</head>
+<body>
+
+<!-- reforge.html — redesign mockup (companion to index.html, the landing). Host in the same GitHub Pages repo. -->
+
+<header>
+  <div class="logo">REFORGE<span>.io</span></div>
+  <div class="header-tag">Legacy Analyzer</div>
+  <div class="header-spacer"></div>
+  <div class="status"><div class="dot"></div><span id="statusText">Ready</span></div>
+  <a class="header-link" href="mailto:adrien@vyniad.be">adrien@vyniad.be</a>
+  <button class="theme-btn" id="themeBtn">☀</button>
+</header>
+
+<div class="workspace">
+  <aside class="left">
+    <div class="panel-h">⬆ Source</div>
+    <div class="dropzone" id="dz">
+      <input type="file" id="fileInput" multiple style="display:none">
+      <span class="icon">📁</span>
+      Drop your legacy files here<br>
+      JCL · COBOL · CPY — or a Reforge project (.json)<br>
+      or <span class="browse">browse files</span>
+    </div>
+    <button class="sample-btn" id="sampleBtn">⚡ Try with a sample system</button>
+    <div class="file-list" id="fileList"></div>
+    <button class="clear-btn" id="clearAll" onclick="clearAllFiles()" style="display:none">Clear all files</button>
+    <div class="stat-grid" id="stats"></div>
+    <button class="analyze-btn" id="analyzeBtn" disabled>▶ Analyze</button>
+    <button class="analyze-btn" id="exportBtn" style="display:none;margin-top:8px">⬇ Export project (.json)</button>
+  </aside>
+
+  <main class="right">
+    <nav class="groups" id="groups"></nav>
+    <nav class="subtabs" id="subtabs"></nav>
