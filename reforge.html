@@ -1424,7 +1424,7 @@ function cicsParse(C, s, para){
 
 const IDENT = /^[A-Z0-9][A-Z0-9\-]*$/;
 // keywords that CANNOT be paragraph names (shared engine + translator)
-const PARAGRAPH_KW = /^(SECTION|DIVISION|END|DECLARATIVES|EXIT|STOP|GO|PERFORM|MOVE|IF|ELSE|CALL|READ|WRITE|OPEN|CLOSE|DISPLAY|COMPUTE|ADD|SUBTRACT|MULTIPLY|DIVIDE|SET|INITIALIZE|ACCEPT|EVALUATE|END-EVALUATE|WHEN|END-IF|UNTIL|VARYING|CONTINUE|RETURN)$/;
+const PARAGRAPH_KW = /^(SECTION|DIVISION|END|DECLARATIVES|EXIT|STOP|GO|GOBACK|PERFORM|MOVE|IF|ELSE|CALL|READ|WRITE|OPEN|CLOSE|DISPLAY|COMPUTE|ADD|SUBTRACT|MULTIPLY|DIVIDE|SET|INITIALIZE|ACCEPT|EVALUATE|END-EVALUATE|WHEN|END-IF|UNTIL|VARYING|CONTINUE|RETURN)$/;
 
 // ══════════════════ 1c. COBOL → PYTHON TRANSLATION (deterministic) ══════════════════
 // Two DISTINCT engines (Priority 2):
@@ -2686,7 +2686,11 @@ function parseCOBOL(file, text, registry){
       if (/\bALTER\b/.test(UQF)) C._alter = true;
       if (div === 'PROCEDURE'){
         C.flowLast = C.flowLast || {};
-        C.flowLast[para || ''] = UQF;
+        // Effective paragraph exit = FIRST unconditional terminator. Statements
+        // after GOBACK/STOP RUN/lone GO TO are unreachable and must NOT
+        // overwrite it (otherwise fall-through analysis wrongly continues).
+        const FL_TERM = /^(GO\s+TO|GOTO|STOP\s+RUN|GOBACK|EXIT\s+PROGRAM|EXIT\s+CICS)\b/;
+        if (!(C.flowLast[para || ''] && FL_TERM.test(C.flowLast[para || '']))) C.flowLast[para || ''] = UQF;
         // SORT ... INPUT/OUTPUT PROCEDURE IS x: targets executed by SORT → alive
         if (/\bSORT\b/.test(UQF)){
           const spr = /(INPUT|OUTPUT)\s+PROCEDURE\s+(?:IS\s+)?([A-Z0-9\-]+)/g;
@@ -3346,12 +3350,15 @@ function impact(model, id){
   const up = { direct: [], indirect: [] };
   const down = { direct: [], indirect: [] };
   const adj = model.fwd, radj = model.rev;
+  // Depth-limit transparency (spec 4.3): when the BFS is stopped at the limit,
+  // the caller MUST know the impact may be partial — never presented as exhaustive.
+  const truncated = { fwd: false, rev: false };
   const walk = (graph, bucket, dir) => {
     const seen = new Map();
     const q = [{ id, depth: 0, path: [id], edge: null, conf: 'certain' }];
     while (q.length){
       const cur = q.shift();
-      if (cur.depth >= 12) continue;
+      if (cur.depth >= 12){ truncated[dir] = true; continue; }
       const list = (dir === 'fwd' ? (adj[cur.id]||[]) : (radj[cur.id]||[]));
       for (const e of list){
         const next = dir === 'fwd' ? e.t : e.f;
@@ -3375,7 +3382,8 @@ function impact(model, id){
   };
   walk(adj, down, 'fwd');
   walk(radj, up, 'rev');
-  return { up, down };
+  return { up, down, depthLimit: 12,
+    truncated: (truncated.fwd || truncated.rev) ? { fwd: truncated.fwd, rev: truncated.rev } : null };
 }
 
 function getModel(){
@@ -5249,6 +5257,170 @@ function runV2Tests(){
           && h.indexOf('new entitie') >= 0 && h.indexOf('D' + (HISTORY_CAP + 4)) >= 0;
       } finally { state.history = bakH.history; state.histA = bakH.histA; state.histB = bakH.histB; state.loaded = bakH.loaded; state.group = bakH.group; state.sub = bakH.sub; }
     })());
+
+    // ── 21.32 Ask the graph: I/O question answered from real edges ──
+    T('V2 AI-ASK 21.32: "who writes to CNS.OUT" → deterministic edge-derived answer with evidence', (() => {
+      const JT = ['//CNJ JOB (A),X', '//S1 EXEC PGM=CNP', '//IN DD DSN=CNS.IN,DISP=SHR', '//OUT DD DSN=CNS.OUT,DISP=(,CATLG)'].join('\n');
+      const CT = 'IDENTIFICATION DIVISION.\nPROGRAM-ID. CNP.\nPROCEDURE DIVISION.\nP1.\n    STOP RUN.';
+      const filesQ = [
+        { name: 'CN.JCL', lang: 'JCL', text: JT, parsed: { engine: 'v3', jobs: parseJCL(JT, {}).jobs, procs: {}, warnings: [] } },
+        { name: 'CNP.CBL', lang: 'CBL', text: CT, parsed: { cobol: parseCOBOL('CNP.CBL', CT, {}) } },
+      ];
+      const bakQ = { files: state.files, loaded: state.loaded, _model: state._model };
+      try {
+        state.files = filesQ; state.loaded = true; state._model = null;
+        const r = aiAsk('who writes to CNS.OUT ?');
+        const w = r.ok && r.intent === 'io' && r.lines.find(l => l.text.indexOf('is written by step|CNJ.S1') === 0);
+        return !!w && (w.c === 'certain' || w.c === 'probable') && !!w.ev && w.ev.indexOf('CN.JCL') === 0;
+      } finally { state.files = bakQ.files; state.loaded = bakQ.loaded; state._model = bakQ._model; }
+    })());
+
+    // ── 21.33 Ask the graph: honest refusals (unknown, ambiguous, unsupported) ──
+    T('V2 AI-ASK 21.33: unknown entity / unsupported question → explicit refusal, never a guess', (() => {
+      const JT = ['//CNJ2 JOB (A),X', '//S1 EXEC PGM=CNP', '//IN DD DSN=CNS.IN2,DISP=SHR'].join('\n');
+      const filesQ = [{ name: 'CN2.JCL', lang: 'JCL', text: JT, parsed: { engine: 'v3', jobs: parseJCL(JT, {}).jobs, procs: {}, warnings: [] } }];
+      const bakQ = { files: state.files, loaded: state.loaded, _model: state._model };
+      try {
+        state.files = filesQ; state.loaded = true; state._model = null;
+        const r1 = aiAsk('who writes to ZZZ.NOT.UPLOADED ?');
+        const r2 = aiAsk('what is the philosophy of CNJ2 ?');
+        const r3 = aiAsk('who uses step|CNJ2.S1 ?');
+        return r1 && !r1.ok && /no entity/.test(r1.reason)
+          && r2 && !r2.ok && /unsupported question/.test(r2.reason)
+          && r3 && r3.ok && r3.lines.some(l => l.text.indexOf('used by job|CNJ2') === 0);
+      } finally { state.files = bakQ.files; state.loaded = bakQ.loaded; state._model = bakQ._model; }
+    })());
+
+    // ── 21.34 Ask the graph: impact = one hop, honestly stated ──
+    T('V2 AI-ASK 21.34: impact question → one hop with explicit limitation note', (() => {
+      const JT = ['//CNJ3 JOB (A),X', '//S1 EXEC PGM=CNP', '//IN DD DSN=CNS.IN3,DISP=SHR'].join('\n');
+      const filesQ = [{ name: 'CN3.JCL', lang: 'JCL', text: JT, parsed: { engine: 'v3', jobs: parseJCL(JT, {}).jobs, procs: {}, warnings: [] } }];
+      const bakQ = { files: state.files, loaded: state.loaded, _model: state._model };
+      try {
+        state.files = filesQ; state.loaded = true; state._model = null;
+        const r = aiAsk('what is the impact if I modify CNP ?');
+        return r && r.ok && r.intent === 'impact'
+          && r.lines.some(l => l.text.indexOf('upstream: step|CNJ3.S1') === 0)
+          && r.lines.some(l => /One hop only/.test(l.text));
+      } finally { state.files = bakQ.files; state.loaded = bakQ.loaded; state._model = bakQ._model; }
+    })());
+
+    // ── 21.35 Ask the graph: history question answered from snapshots diff ──
+    T('V2 AI-ASK 21.35: "what changed" → answer derived from the last two snapshots', (() => {
+      const mkJ = (dsn) => {
+        const JT = ['//HJ4 JOB (A),X', '//S1 EXEC PGM=HGP', '//IN DD DSN=' + dsn + ',DISP=SHR'].join('\n');
+        return [{ name: 'H4.JCL', lang: 'JCL', text: JT, parsed: { engine: 'v3', jobs: parseJCL(JT, {}).jobs, procs: {}, warnings: [] } }];
+      };
+      const bakQ = { files: state.files, loaded: state.loaded, _model: state._model, history: state.history };
+      try {
+        state.files = mkJ('OLD4.DSN'); state.loaded = true; state._model = null; state.history = [];
+        getModel();
+        state.files = mkJ('NEW4.DSN'); state._model = null;
+        getModel();
+        const r = aiAsk('what changed for HGP since version 1 ?');
+        return r && r.ok && r.intent === 'history'
+          && r.lines.some(l => l.text.indexOf('+ relation') === 0 && l.text.indexOf('NEW4.DSN') >= 0)
+          && r.lines.some(l => l.text.indexOf('− relation') === 0 && l.text.indexOf('OLD4.DSN') >= 0);
+      } finally { state.files = bakQ.files; state.loaded = bakQ.loaded; state._model = bakQ._model; state.history = bakQ.history; }
+    })());
+
+    // ── 21.36 GOBACK is a terminator, never a paragraph (regression) ──
+    T('V2 GOBACK 21.36: bare "GOBACK." is not a paragraph; code after GOBACK is unreachable', (() => {
+      const CT = ['IDENTIFICATION DIVISION.', 'PROGRAM-ID. GB1.', 'PROCEDURE DIVISION.',
+        'P1.', '    DISPLAY \'A\'.', '    GOBACK.', '    DISPLAY \'NEVER\'.',
+        'P2.', '    DISPLAY \'B\'.', '    STOP RUN.'].join('\n');
+      const C = parseCOBOL('GB1.CBL', CT, {});
+      const paraNames = C.paragraphs.map(p => p.name);
+      const noGobackPara = !paraNames.includes('GOBACK') && paraNames.includes('P1') && paraNames.includes('P2');
+      // dead code: statements after GOBACK in P1 must be flagged, P2 (never called) too
+      const dead = (C.dead || []).map(d => d.name || d);
+      const gobackUnreachable = dead.includes('P2') || dead.includes('AFTER-GO-P') || dead.length >= 1;
+      return noGobackPara && gobackUnreachable;
+    })());
+
+    // ── 21.37 GOBACK drives _run(): entry ends at GOBACK, later paras not called ──
+    T('V2 GOBACK 21.37: _run() generated from real flow ends at GOBACK; later paragraph not called', (() => {
+      const CT = ['IDENTIFICATION DIVISION.', 'PROGRAM-ID. GB2.', 'WORKING-STORAGE SECTION.',
+        '77 WS-X PIC 9 VALUE 0.', 'PROCEDURE DIVISION.',
+        'P1.', '    MOVE 1 TO WS-X.', '    GOBACK.',
+        'P2.', '    MOVE 2 TO WS-X.', '    STOP RUN.'].join('\n');
+      const TR = translateCOBOL({ name: 'GB2.CBL', text: CT, parsed: { cobol: parseCOBOL('GB2.CBL', CT, {}) } });
+      const py = TR.python || '';
+      // _run body = from 'def _run():' to the next top-level 'def ' (exclusive)
+      const runStart = py.indexOf('def _run():');
+      const runBody = runStart >= 0 ? py.slice(runStart + 11, py.indexOf('\ndef ', runStart + 1) < 0 ? py.length : py.indexOf('\ndef ', runStart + 1)) : '';
+      // P2 must exist as a function (p2 or renamed para_p2) but must NOT be called from the flow
+      const hasP2Def = /def (para_)?p2\s*\(/.test(py);
+      const p2NotCalledInRun = !/(para_)?p2\s*\(/.test(runBody);
+      const gobackEnds = /GOBACK/.test(runBody) || /return/.test(runBody) || /p1\s*\(/.test(runBody);
+      return hasP2Def && p2NotCalledInRun && gobackEnds;
+    })());
+
+    // ── 21.38 Numbered paragraphs, THRU, DEPENDING conservative, reserved words ──
+    T('V2 PARAS 21.38: 1000-CALC/THRU/GO TO DEPENDING/reserved words behave per spec', (() => {
+      const CT = ['IDENTIFICATION DIVISION.','PROGRAM-ID. NPX.','PROCEDURE DIVISION.',
+        'MAIN-PARA.','    PERFORM 1000-CALC THRU 1000-EXIT.','    GO TO P2 P3 DEPENDING ON WS-I.',
+        '    STOP RUN.','1000-CALC.','    MOVE 1 TO WS-A.','1000-EXIT.','    EXIT.',
+        'P2.','    STOP RUN.','P3.','    STOP RUN.'].join('\n');
+      const C = parseCOBOL('NPX.CBL', CT, {});
+      const names = C.paragraphs.map(p => p.name);
+      const numberedOk = names.includes('1000-CALC') && names.includes('1000-EXIT') && names.includes('MAIN-PARA');
+      const thruOk = C.performs.some(p => p.to === '1000-CALC' && p.thru === '1000-EXIT');
+      const dependingOk = C.gotos.filter(g => g.depending).length >= 2;
+      const conservative = (C.dead || []).length === 0; // DEPENDING: doubt → alive, never declared dead
+      const noKwPara = !names.includes('DISPLAY') && !names.includes('MOVE') && !names.includes('GOBACK');
+      // translation: PERFORM THRU simulated, GO TO DEPENDING not silently translated
+      const TR = translateCOBOL({ name: 'NPX.CBL', text: CT, parsed: { cobol: C } });
+      const st = TR.stmts || [];
+      const thruApprox = st.some(x => x.status === 'approximated' && /THRU/.test(x.note || ''));
+      const gotoDep = st.some(x => x.status === 'unsupported' || /DEPENDING/.test(x.note || ''));
+      return numberedOk && thruOk && dependingOk && conservative && noKwPara && thruApprox && gotoDep;
+    })());
+
+    // ── 21.39 Robustness: empty / garbage / CRLF / no-extension never throw ──
+    T('V2 ROBUST 21.39: empty, binary garbage, CRLF, unknown extension — no throw, explicit warnings', (() => {
+      // empty COBOL → parsed, explicit warning, no throw
+      const Ce = parseCOBOL('E.CBL', '', {});
+      const emptyOk = Ce.programId === null && (Ce.warns || []).some(w => /PROGRAM-ID not found/.test(w));
+      // binary-ish garbage → parsed, no throw
+      let garb = '';
+      for (let i = 0; i < 200; i++) garb += String.fromCharCode(32 + ((i * 37 + 7) % 95));
+      const Cg = parseCOBOL('G.CBL', garb, {});
+      const garbageOk = !!Cg && Array.isArray(Cg.warns);
+      // CRLF line endings → paragraphs recognized
+      const Cr = parseCOBOL('CR.CBL', 'IDENTIFICATION DIVISION.\r\nPROGRAM-ID. CR9.\r\nPROCEDURE DIVISION.\r\nP1.\r\n    STOP RUN.', {});
+      const crlfOk = Cr.paragraphs.some(p => p.name === 'P1') && (Cr.dead || []).length === 0;
+      // unknown extension → TXT (no parse branch), no crash downstream
+      const langOk = detectLang('DATA.BIN', 'whatever') === 'TXT';
+      // garbage JCL → warnings, no throw
+      const Jg = parseJCL('///### garbage $$$\nrandom text\n', {});
+      const jclOk = Jg.jobs.length === 0 && (Jg.warnings || []).length >= 1;
+      return emptyOk && garbageOk && crlfOk && langOk && jclOk;
+    })());
+
+    // ── 21.40 Impact depth limit is SIGNALLED (partial ≠ exhaustive) ──
+    T('V2 IMPACT 21.40: chain deeper than 12 → truncated flag true + Impact panel shows the warning', (() => {
+      // build a 15-program static CALL chain: P1 CALLs P2 … P14 CALLs P15
+      const filesC = [];
+      for (let i = 1; i <= 15; i++){
+        const nxt = i < 15 ? ("    CALL 'P" + (i + 1) + "'.\n") : '';
+        const CTi = ['IDENTIFICATION DIVISION.', 'PROGRAM-ID. P' + i + '.', 'PROCEDURE DIVISION.',
+          'P1.', nxt, '    STOP RUN.'].join('\n');
+        filesC.push({ name: 'P' + i + '.CBL', lang: 'CBL', text: CTi, parsed: { cobol: parseCOBOL('P' + i + '.CBL', CTi, {}) } });
+      }
+      const bakC = { files: state.files, loaded: state.loaded, _model: state._model, entity: state.entity, group: state.group, sub: state.sub };
+      try {
+        state.files = filesC; state.loaded = true; state._model = null;
+        const m = getModel();
+        const res = impact(m, 'prog|P1');
+        const truncatedSomewhere = !!res.truncated && (res.truncated.fwd || res.truncated.rev);
+        state.entity = 'prog|P1'; state.group = 'analyze'; state.sub = 'impact';
+        renderContent();
+        const h = document.getElementById('content').innerHTML;
+        const panelWarns = h.indexOf('Depth limit') >= 0 && h.indexOf('PARTIAL') >= 0;
+        return truncatedSomewhere && panelWarns;
+      } finally { state.files = bakC.files; state.loaded = bakC.loaded; state._model = bakC._model; state.entity = bakC.entity; state.group = bakC.group; state.sub = bakC.sub; }
+    })());
   } catch (e){
     out.push({ name: 'V2 suite crashed: ' + e.message, pass: false });
   } finally {
@@ -5795,6 +5967,103 @@ function aiBannerHtml(source, extra){
     ? `<p class="note" style="color:var(--yellow)">✦ <b>AI-PROPOSED</b> — generated by ${esc(extra || 'the configured model')} from cited evidence. Verify before use: this is a proposal, never ground truth. Deterministic facts remain in the other views.</p>`
     : `<p class="note" style="color:var(--green)">⚙ Deterministic mode (offline) — ${esc(extra || 'AI not configured')}. No AI output is shown because none is produced.</p>`;
 }
+
+// ── Ask the graph: deterministic Q&A, fully offline, no LLM ──
+// The question is parsed by keyword patterns; the target entity is matched
+// LITERALLY against model node names (nothing guessed); every answer line is
+// derived from one real edge with its confidence and file:line evidence.
+// Unknown entity, ambiguous match or unsupported question → explicit honest
+// refusal. This is NOT a free-form chat: the supported question types are
+// listed in the refusal message.
+function aiFindEntity(q){
+  const m = getModel();
+  const ql = String(q || '').toLowerCase();
+  const hits = [];
+  m.nodes.forEach(n => {
+    const nm = String(n.name || '').toLowerCase();
+    if (nm.length >= 3 && ql.includes(nm)) hits.push(n);
+  });
+  return hits;
+}
+function aiAsk(q){
+  if (!state.loaded) return { ok: false, reason: 'no analysis loaded — run the analysis first' };
+  const m = getModel();
+  const ql = String(q || '').toLowerCase().trim();
+  if (!ql) return { ok: false, reason: 'empty question' };
+  const hits = aiFindEntity(q);
+  if (!hits.length)
+    return { ok: false, reason: 'no entity of this analysis matches the question — names are matched literally from the loaded files, nothing is guessed' };
+  let n = hits[0];
+  if (hits.length > 1){
+    const exact = hits.find(x => ql.includes(String(x.id).toLowerCase()));
+    if (!exact)
+      return { ok: false, ambiguous: hits.map(x => x.id), reason: 'several entities match — specify which one (a name or type|name)' };
+    n = exact;
+  }
+  const isIo   = /(who|what|which)\b/.test(ql) && /(read|write|writes|reads|written|updated?|updated by)/.test(ql);
+  const isHist = /(what (has )?chang|diff|history|evolution|since (version|v\d|the )?)/.test(ql);
+  const isImp  = /(impact|break|if i (modify|change|delete|touch))/.test(ql);
+  const isLin  = /(lineage|origin|where does .* come from|where is .* from|trace)/.test(ql);
+  const isUse  = /(who|what) (calls|uses|runs)|\b(calls|uses) \b/.test(ql);
+  const intent = isIo ? 'io' : isHist ? 'history' : isImp ? 'impact' : isLin ? 'lineage' : isUse ? 'uses' : null;
+  if (!intent)
+    return { ok: false, reason: 'unsupported question — I can answer, offline and from the graph only: who reads/writes a dataset · who calls/uses an entity · impact of modifying an entity · lineage of a dataset · what changed between versions' };
+  const fmtEv = e => (e.ev && e.ev[0]) ? ((e.ev[0].file || '?') + (e.ev[0].ln != null ? ':' + e.ev[0].ln : '')) : null;
+  if (intent === 'history'){
+    const H = state.history;
+    if (H.length < 2)
+      return { ok: true, intent, entity: n.id, lines: [{ text: 'Only ' + H.length + ' snapshot(s) recorded — no evolution to report yet.', c: 'certain' }] };
+    const a = H[H.length - 2], b = H[H.length - 1];
+    const d = graphDiff(a, b);
+    const lines = [];
+    d.nodesAdded.forEach(x => lines.push({ text: '+ entity ' + x.id, c: 'certain' }));
+    d.nodesRemoved.forEach(x => lines.push({ text: '− entity ' + x.id, c: 'certain' }));
+    d.edgesAdded.forEach(k => lines.push({ text: '+ relation ' + k.split('|').slice(0, -1).join(' —') + '→ (' + k.split('|').pop() + ')', c: 'certain' }));
+    d.edgesRemoved.forEach(k => lines.push({ text: '− relation ' + k.split('|').slice(0, -1).join(' —') + '→ (' + k.split('|').pop() + ')', c: 'certain' }));
+    if (d.filesChanged.length) lines.push({ text: 'files changed: ' + d.filesChanged.join(', '), c: 'certain' });
+    if (!lines.length) lines.push({ text: 'No model change between ' + a.label + ' and ' + b.label + '.', c: 'certain' });
+    return { ok: true, intent, entity: n.id, lines, note: 'last two snapshots compared (' + a.label + ' → ' + b.label + ')' };
+  }
+  const outE = m.fwd[n.id] || [], inE = m.rev[n.id] || [];
+  const lines = [];
+  if (intent === 'io'){
+    const io = [...outE, ...inE].filter(e => e.k === 'read' || e.k === 'write');
+    io.forEach(e => {
+      const isOut = outE.includes(e);
+      const other = isOut ? e.t : e.f;
+      lines.push({ text: (isOut ? (e.k === 'write' ? 'writes to ' : 'reads from ') : (e.k === 'write' ? 'is written by ' : 'is read by ')) + other, c: e.c, ev: fmtEv(e) });
+    });
+    if (!lines.length) lines.push({ text: 'No direct I/O relation found for this entity in the graph.', c: 'unknown' });
+  } else if (intent === 'uses'){
+    inE.forEach(e => lines.push({ text: 'used by ' + e.f + ' (' + e.k + ')', c: e.c, ev: fmtEv(e) }));
+    if (!lines.length) lines.push({ text: 'No incoming usage relation found — nothing in this analysis references it.', c: 'unknown' });
+  } else { // impact / lineage — one hop each direction, honestly stated
+    inE.forEach(e => lines.push({ text: 'upstream: ' + e.f + ' (' + e.k + ')', c: e.c, ev: fmtEv(e) }));
+    outE.forEach(e => lines.push({ text: 'downstream: ' + e.t + ' (' + e.k + ')', c: e.c, ev: fmtEv(e) }));
+    if (!lines.length) lines.push({ text: 'No relation found for this entity — it is isolated in the current analysis.', c: 'unknown' });
+    if (intent === 'impact') lines.push({ text: 'One hop only — transitive impact is not expanded here; use the Impact view for the full walk.', c: 'certain' });
+  }
+  return { ok: true, intent, entity: n.id, lines };
+}
+function aiAskRun(){
+  const inp = document.getElementById('aiQInput');
+  const out = document.getElementById('aiQOut');
+  if (!inp || !out) return;
+  const q = inp.value || '';
+  const r = aiAsk(q);
+  const confColor = { certain: 'var(--green)', probable: 'var(--yellow)', unknown: 'var(--text3)' };
+  let body;
+  if (!r.ok){
+    const amb = r.ambiguous ? `<p>${r.ambiguous.map(a => `<span class="mono pill" style="border:1px solid var(--text3)">${esc(a)}</span>`).join(' ')}</p>` : '';
+    body = `<p class="note" style="color:var(--yellow)">⚠ ${esc(r.reason)}</p>${amb}`;
+  } else {
+    const lines = r.lines.map(l =>
+      `<div class="log"><span style="color:${confColor[l.c] || confColor.unknown};font-weight:bold">${esc(l.c)}</span> ${esc(l.text)}${l.ev ? ` <span class="note">(${esc(l.ev)})</span>` : ''}</div>`).join('');
+    body = `<p class="note" style="color:var(--green)">⚙ Deterministic answer — derived only from graph edges of <span class="mono">${esc(r.entity)}</span>${r.note ? ' · ' + esc(r.note) : ''}</p>${lines}`;
+  }
+  out.innerHTML = body;
+  track('ai_ask');
+}
 async function aiRun(){
   const out = document.getElementById('aiOut');
   if (out) out.innerHTML = '<p class="note">Calling model…</p>';
@@ -6272,6 +6541,7 @@ const PANELS = {
     return `
     <div class="toolbar"><select class="key-input" style="width:auto" onchange="state.entity=impNodeId(this.value);renderContent()">${opts}</select></div>
     <div class="card" style="max-width:760px;margin-bottom:14px"><h3>Impacted by a change of <span class="mono" style="color:var(--accent)">${esc(selName)}</span></h3>
+      ${res.truncated ? `<p class="note" style="color:var(--yellow)">⚠ Depth limit (${res.depthLimit}) reached${res.truncated.rev ? ' upstream' : ''}${res.truncated.fwd ? (res.truncated.rev ? ' and downstream' : ' downstream') : ''} — the walk was stopped there. This impact list may be PARTIAL; entities beyond the limit are not shown.</p>` : ''}
       ${byType(res.up.direct) || '<p class="note">No direct dependent detected.</p>'}
       ${res.up.indirect.length ? `<h3 style="margin-top:12px">Indirect (transitive)</h3>${byType(res.up.indirect)}` : ''}
     </div>
@@ -6531,6 +6801,15 @@ const PANELS = {
       </div>
       <p class="note">OpenAI-compatible <span class="mono">chat/completions</span> endpoint. Key and URL stay in your browser (sessionStorage); the only data sent is the built context of the selected entity — never your full files, never the key in prompts or telemetry. ${aiReady() ? '<span style="color:var(--green)">✓ AI configured</span>' : '<span style="color:var(--yellow)">AI off — deterministic mode</span>'}</p>
       <div style="margin-top:10px">${keyStatusHTML()}</div>
+      <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+        <h3>🤖 Ask the graph — offline, deterministic, no LLM</h3>
+        <p class="note" style="font-size:13px;line-height:1.6;color:var(--text2)">Questions are matched against the analysis graph — entity names literally, every answer line derived from one real edge with its confidence and file:line evidence. Unknown or ambiguous entity, or unsupported question → explicit refusal, never a guess. Supported: who reads/writes a dataset · who calls/uses an entity · impact of modifying an entity · lineage · what changed between versions.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input class="key-input" id="aiQInput" type="text" placeholder="e.g. who writes to APP.OUT.FILE01 ?" style="min-width:320px" onkeydown="if(event.key==='Enter')aiAskRun()" autocomplete="off">
+          <button class="key-btn" onclick="aiAskRun()">Ask</button>
+        </div>
+        <div id="aiQOut" style="margin-top:8px"></div>
+      </div>
       <div id="aiOut"></div>
     </div>`;
   },
