@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Reforge build: assemble the distributable single-file app from src/ modules.
-# Usage: bash build.sh            -> index.html (repo root, served by GitHub Pages)
+# Reforge build: assemble the analyzer single-file app from src/ modules.
+# Usage: bash build.sh            -> reforge.html (repo root, linked from the landing)
 #        bash build.sh --canvas   -> also CANVAS.md (frontmatter + app)
 # Pure concatenation: no transformation, no minification.
+# index.html (the landing page) is hand-maintained and NOT built.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -11,14 +12,14 @@ cd "$(dirname "$0")"
   cat src/head.html
   for m in src/[0-9][0-9]-*.js; do cat "$m"; done
   printf '%s' "$(cat src/tail.html)"
-} > index.html
+} > reforge.html
 
-# awk-trim possible trailing newline so index.html == orig byte-for-byte
-awk 'NR>1{print prev} {prev=$0} END{printf "%s", prev}' index.html > index.html.tmp && mv index.html.tmp index.html
+# awk-trim possible trailing newline so reforge.html == orig byte-for-byte
+awk 'NR>1{print prev} {prev=$0} END{printf "%s", prev}' reforge.html > reforge.html.tmp && mv reforge.html.tmp reforge.html
 
 if [[ "${1:-}" == "--canvas" ]]; then
-  { cat src/frontmatter.txt; printf '\n'; cat index.html; } > CANVAS.md
+  { cat src/frontmatter.txt; printf '\n'; cat reforge.html; } > CANVAS.md
   echo "Built: CANVAS.md"
 fi
 
-echo "Built: index.html ($(wc -c < index.html) bytes)"
+echo "Built: reforge.html ($(wc -c < reforge.html) bytes)"
